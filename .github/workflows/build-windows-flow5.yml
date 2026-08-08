@@ -70,22 +70,35 @@ jobs:
           $ErrorActionPreference = "Stop"
           $ProgressPreference = "SilentlyContinue"
           New-Item -ItemType Directory -Force deps/downloads, deps/occt, deps/thirdparty, deps/gmsh | Out-Null
-          Invoke-WebRequest "https://github.com/Open-Cascade-SAS/OCCT/releases/download/V7_9_2/opencascade-7.9.2-vc14-64.zip" -OutFile deps/downloads/occt.zip
+
+          $occtBundle = "deps/downloads/occt-release.zip"
+          $occtBundleDir = "deps/downloads/occt-release"
+
+          Invoke-WebRequest "https://github.com/Open-Cascade-SAS/OCCT/releases/download/V7_9_2/opencascade-release-no-pch.zip" -OutFile $occtBundle
           Invoke-WebRequest "https://github.com/Open-Cascade-SAS/OCCT/releases/download/V7_9_2/3rdparty-vc14-64.zip" -OutFile deps/downloads/thirdparty.zip
           Invoke-WebRequest "https://gmsh.info/bin/Windows/gmsh-4.14.1-Windows64-sdk.zip" -OutFile deps/downloads/gmsh.zip
-          Expand-Archive deps/downloads/occt.zip deps/occt
-          Expand-Archive deps/downloads/thirdparty.zip deps/thirdparty
-          Expand-Archive deps/downloads/gmsh.zip deps/gmsh
+
+          Expand-Archive $occtBundle $occtBundleDir -Force
+          $occtArchive = Get-ChildItem $occtBundleDir -File -Filter "opencascade-*.zip" | Select-Object -First 1
+          if (-not $occtArchive) { throw "OCCT inner archive was not found" }
+
+          Expand-Archive $occtArchive.FullName deps/occt -Force
+          Expand-Archive deps/downloads/thirdparty.zip deps/thirdparty -Force
+          Expand-Archive deps/downloads/gmsh.zip deps/gmsh -Force
+
           $occ = Get-ChildItem deps/occt -Directory -Recurse | Where-Object {
             (Test-Path (Join-Path $_.FullName "inc/Standard.hxx")) -and
             (Test-Path (Join-Path $_.FullName "win64/vc14/lib/TKernel.lib"))
           } | Select-Object -First 1
+
           $gmsh = Get-ChildItem deps/gmsh -Directory -Recurse | Where-Object {
             (Test-Path (Join-Path $_.FullName "include/gmsh.h")) -and
             (Test-Path (Join-Path $_.FullName "lib/gmsh.dll.lib"))
           } | Select-Object -First 1
+
           if (-not $occ) { throw "OCCT 7.9.2 SDK root was not found" }
           if (-not $gmsh) { throw "Gmsh 4.14.1 SDK root was not found" }
+
           "OCCT_ROOT=$($occ.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           "GMSH_ROOT=$($gmsh.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
