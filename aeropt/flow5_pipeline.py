@@ -1,0 +1,1246 @@
+from __future__ import annotations
+
+import base64
+from copy import deepcopy
+from dataclasses import dataclass
+import hashlib
+import threading
+from typing import Any, Callable
+
+import numpy as np
+
+from .airfoil import airfoil_coordinates
+from .baselines import BaselineProfile, build_derived_baseline_profile
+from .checkpoint import OptimizerCheckpointStore, optimizer_fingerprint
+from .convergence import BudgetEscalationSettings
+from .exporters import (
+    airfoil_dat,
+    flow5_analysis_xml,
+    flow5_bundle_bytes,
+    flow5_native_results_csv,
+    flow5_plane_xml,
+    project_json,
+    wing_obj,
+    xfoil_polar_csv,
+)
+from .flow5 import Flow5Mesh, Flow5Runner
+from .flow5_optimization import optimize_airfoil_with_flow5, optimize_wing_with_flow5
+from .hydro import HydroSettings
+from .models import CSTAirfoilDesign, Fluid, WingGeometry
+from .structures import StructuralSettings
+from .surrogate import SurrogateSettings
+from .validation import ValidationSettings
+
+
+@dataclass(frozen=True)
+class Flow5NativeSettings:
+    runner_path: str
+    timeout_seconds: float
+    threads: int
+    foil_candidate_budget: int
+    wing_candidate_budget: int
+    finalists: int
+    search_method: str
+    final_method: str
+    alpha_step_search_deg: float
+    alpha_step_final_deg: float
+    ncrit: float
+    xtr_top: float
+    xtr_bottom: float
+    baseline_profile: BaselineProfile
+    cst_order: int
+    foil_coordinate_points: int
+    foil_minimum_improvement_percent: float
+    seed: int
+    search_mesh: Flow5Mesh
+    final_mesh: Flow5Mesh
+    convergence_mesh: Flow5Mesh
+    mesh_convergence_enabled: bool
+    mesh_cd_tolerance_percent: float
+    mesh_alpha_tolerance_deg: float
+    cache_enabled: bool
+    cache_dir: str
+    foil_optimizer: str
+    wing_optimizer: str
+    coupled_iterations: int
+    coupling_cl_tolerance_percent: float
+    coupling_objective_tolerance_percent: float
+    multi_section_geometry_enabled: bool
+    mid_chord_factor_bounds: tuple[float, float]
+    mid_twist_bounds: tuple[float, float]
+    structural_settings: StructuralSettings
+    hydro_settings: HydroSettings
+    spanwise_airfoil_optimization_enabled: bool
+    spanwise_foil_budget_fraction: float
+    spanwise_foil_acceptance_tolerance_percent: float
+    surrogate_settings: SurrogateSettings
+    budget_escalation_settings: BudgetEscalationSettings
+    checkpoint_enabled: bool
+    checkpoint_dir: str
+    multi_seed_runs: int
+    multi_seed_stride: int
+    multi_seed_objective_cv_tolerance_percent: float
+    multi_seed_geometry_cv_tolerance_percent: float
+    validation_settings: ValidationSettings
+
+
+def _sample_speeds(
+    bounds_m_s: tuple[float, float], reference_speed_m_s: float, count: int
+) -> list[float]:
+    """Return an endpoint-inclusive mesh which always contains the reference speed."""
+    values = np.linspace(*bounds_m_s, count)
+    if not np.any(np.isclose(values, reference_speed_m_s, rtol=0.0, atol=1e-10)):
+        internal = np.arange(1, count - 1)
+        replace = int(internal[np.argmin(np.abs(values[internal] - reference_speed_m_s))])
+        values[replace] = reference_speed_m_s
+    return [float(value) for value in np.sort(values)]
+
+
+def _representative_section_cls(wing: dict[str, Any]) -> list[float]:
+    """Return an area-weighted RMS section Cl schedule from flow5 span telemetry."""
+    values: list[float] = []
+    for condition in wing.get("conditions", []):
+        point = condition.get("point", {})
+        distribution = point.get("distribution", [])
+        local_cls: list[float] = []
+        weights: list[float] = []
+        for station in distribution:
+            try:
+                local_cl = float(station["local_cl"])
+                chord = max(float(station["chord_m"]), 1e-9)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if np.isfinite(local_cl) and np.isfinite(chord):
+                local_cls.append(local_cl)
+                weights.append(chord)
+        if local_cls:
+            representative = float(
+                np.sqrt(np.average(np.square(local_cls), weights=weights))
+            )
+        else:
+            representative = float(condition["target_cl"])
+        values.append(float(np.clip(representative, 0.05, 1.8)))
+    return values
+
+
+def _span_station_cls(wing: dict[str, Any], eta: float) -> list[float]:
+    values: list[float] = []
+    semispan = 0.5 * float(wing["geometry"]["span"])
+    target_y = float(np.clip(eta, 0.0, 1.0)) * semispan
+    for condition in wing.get("conditions", []):
+        distribution = condition.get("point", {}).get("distribution", [])
+        usable = []
+        for station in distribution:
+            try:
+                y = abs(float(station["y_m"]))
+                local_cl = float(station["local_cl"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if np.isfinite(y) and np.isfinite(local_cl):
+                usable.append((y, local_cl))
+        if usable:
+            local_cl = min(usable, key=lambda row: abs(row[0] - target_y))[1]
+        else:
+            local_cl = float(condition["target_cl"])
+        values.append(float(np.clip(local_cl, 0.05, 1.8)))
+    return values
+
+
+def _rename_section_foil(
+    foil: CSTAirfoilDesign, dat_text: str, station: str
+) -> tuple[CSTAirfoilDesign, str]:
+    renamed = CSTAirfoilDesign(
+        foil.upper_weights,
+        foil.lower_weights,
+        foil.max_camber,
+        foil.camber_position,
+        foil.thickness,
+        f"{station}-{foil.name}",
+        foil.trailing_edge_gap,
+    )
+    lines = dat_text.splitlines()
+    renamed_dat = "\n".join([renamed.name, *lines[1:]]) + "\n"
+    return renamed, renamed_dat
+
+
+def _native_insights(
+    *,
+    wing: dict[str, Any],
+    wing_meta: dict[str, Any],
+    foil_meta: dict[str, Any],
+    fluid_key: str,
+    span_upper: float,
+    coupled_design: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    geometry = wing["geometry"]
+    conditions = wing.get("conditions", [])
+    messages: list[dict[str, str]] = [
+        {
+            "level": "good",
+            "title": "Aerodinamik puanların tamamı flow5 kaynaklı",
+            "text": (
+                f"Profil için {foil_meta['candidates_evaluated']} CST adayı gömülü XFoil ile; "
+                f"kanat için {wing_meta['candidates_evaluated']} planform {wing_meta['search_method']} ile tarandı. "
+                f"Son {wing_meta['finalists_evaluated']} aday {wing_meta['final_method']} ile yeniden çözüldü."
+            ),
+        }
+    ]
+    if coupled_design and coupled_design.get("enabled"):
+        messages.append(
+            {
+                "level": "good" if coupled_design.get("converged") else "warn",
+                "title": "Foil–kanat geri beslemesi tamamlandı",
+                "text": (
+                    f"{coupled_design.get('iterations_completed', 1)} bağlı iterasyonda gerçek MAC/Re ve "
+                    f"spanwise kesit Cl yükleri profile geri beslendi; seçilen çift iterasyon "
+                    f"{coupled_design.get('selected_iteration', 1)}."
+                ),
+            }
+        )
+    mesh_check = wing_meta.get("mesh_convergence", {})
+    if mesh_check.get("enabled"):
+        messages.append(
+            {
+                "level": "good" if mesh_check.get("passed") else "warn",
+                "title": (
+                    "Panel ağı yakınsadı"
+                    if mesh_check.get("passed")
+                    else "Panel ağı yakınsama toleransını aştı"
+                ),
+                "text": (
+                    f"Final ve ince ağ arasında en büyük CD farkı "
+                    f"%{float(mesh_check.get('max_cd_change_percent', 0.0)):.2f}, "
+                    f"α farkı {float(mesh_check.get('max_alpha_change_deg', 0.0)):.3f}°."
+                ),
+            }
+        )
+    telemetry = wing_meta.get("solver_telemetry", {})
+    if telemetry.get("spanwise_distribution_available"):
+        messages.append(
+            {
+                "level": "info",
+                "title": "Spanwise flow5 telemetrisi alındı",
+                "text": "Yerel Cl, Reynolds, profil/indüklenmiş sürükleme, yakınsama ve yük dağılımı flow5 çalışma noktalarından aktarıldı.",
+            }
+        )
+    spanwise_foils = wing_meta.get("spanwise_airfoil_refinement", {})
+    if spanwise_foils.get("performed"):
+        messages.append(
+            {
+                "level": "good" if spanwise_foils.get("selected") else "info",
+                "title": (
+                    "Kök–orta–uç profilleri seçildi"
+                    if spanwise_foils.get("selected")
+                    else "Üç profilli kanat kazanç sağlamadı"
+                ),
+                "text": (
+                    "Yerel Reynolds ve Cl hedefleriyle orta/uç profilleri ayrı flow5/XFoil aramasından geçti; "
+                    + (
+                        "üç profil çözümlenmiş .fl5 projesine yazıldı."
+                        if spanwise_foils.get("selected")
+                        else "tek profil daha iyi amaç değeri verdiği için korundu."
+                    )
+                ),
+            }
+        )
+    structure = wing_meta.get("structural_check", {})
+    if structure.get("enabled"):
+        if structure.get("performed"):
+            messages.append(
+                {
+                    "level": "good" if structure.get("passed") else "bad",
+                    "title": (
+                        "İsteğe bağlı yapısal tarama geçti"
+                        if structure.get("passed")
+                        else "Yapısal tarama sınır aştı"
+                    ),
+                    "text": (
+                        f"Gerilme kullanımı {float(structure.get('stress_utilization', 0.0)):.2f}, "
+                        f"sehim kullanımı {float(structure.get('deflection_utilization', 0.0)):.2f}, "
+                        f"burulma kullanımı {float(structure.get('twist_utilization', 0.0)):.2f}; "
+                        f"tahmini malzeme kütlesi {float(structure.get('estimated_wing_material_mass_kg', 0.0)):.2f} kg."
+                    ),
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "level": "bad",
+                    "title": "Yapısal tarama için yük verisi yok",
+                    "text": str(structure.get("reason", "Spanwise yük dağılımı alınamadı.")),
+                }
+            )
+    hydro = wing_meta.get("hydro_check", {})
+    if hydro.get("enabled"):
+        if hydro.get("performed"):
+            messages.append(
+                {
+                    "level": "good" if hydro.get("passed") else "bad",
+                    "title": (
+                        "Kavitasyon taraması geçti"
+                        if hydro.get("passed")
+                        else "Kavitasyon marjı yetersiz"
+                    ),
+                    "text": (
+                        f"En kötü kavitasyon kullanımı "
+                        f"{float(hydro.get('cavitation_utilization', 0.0)):.2f}; "
+                        f"minimum emniyetli marj oranı "
+                        f"{float(hydro.get('minimum_cavitation_margin_ratio', 0.0)):.2f}. "
+                        f"Serbest yüzey risk bayrağı: "
+                        f"{'evet' if hydro.get('free_surface_risk') else 'hayır'}."
+                    ),
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "level": "bad",
+                    "title": "Kavitasyon için Cp_min alınamadı",
+                    "text": str(hydro.get("reason", "flow5 panel basınçları bulunamadı.")),
+                }
+            )
+    selection = foil_meta.get("selection", {})
+    baseline = foil_meta.get("baseline", {})
+    if selection.get("selected_baseline"):
+        messages.append(
+            {
+                "level": "info",
+                "title": "Başlangıç profili korundu",
+                "text": (
+                    f"{baseline.get('display_name', 'Başlangıç profili')} ince flow5 doğrulamasında "
+                    "yeterince aşılmadığı için kanat optimizasyonuna bu profil aktarıldı."
+                ),
+            }
+        )
+    else:
+        improvement = selection.get("selected_improvement_vs_baseline_percent")
+        messages.append(
+            {
+                "level": "good",
+                "title": "Başlangıç profilinden daha iyi profil seçildi",
+                "text": (
+                    f"Seçilen {selection.get('selected_family', 'CST')} profilinin çok-noktalı amaç "
+                    f"iyileşmesi başlangıca göre %{float(improvement or 0.0):.2f}; aynı profil kanat aşamasına aktarıldı."
+                ),
+            }
+        )
+    if geometry["sweep_deg"] < 1.0:
+        messages.append(
+            {
+                "level": "info",
+                "title": "Sweep kazancı bulunmadı",
+                "text": "flow5 araması verilen hız ve boyut zarfında çeyrek-kord sweep'i yaklaşık sıfırda seçti.",
+            }
+        )
+    else:
+        messages.append(
+            {
+                "level": "info",
+                "title": "Sweep çözümde kaldı",
+                "text": f"Son panel çözümündeki çeyrek-kord sweep {geometry['sweep_deg']:.2f}°.",
+            }
+        )
+    if geometry["taper"] < 0.90:
+        messages.append(
+            {
+                "level": "good",
+                "title": "Taper seçildi",
+                "text": f"flow5 amaç fonksiyonu taper oranını {geometry['taper']:.3f} seçti; dikdörtgen referansla drag farkı sonuç tablosunda gösteriliyor.",
+            }
+        )
+    if geometry["tip_twist_deg"] < -0.25:
+        messages.append(
+            {
+                "level": "good",
+                "title": "Washout seçildi",
+                "text": f"Uç twist değeri {geometry['tip_twist_deg']:.2f}°; bu değer tüm hız noktalarının ortak amaç fonksiyonundan çıktı.",
+            }
+        )
+    if abs(geometry["span"] - span_upper) <= 0.01 * max(span_upper, 1e-9):
+        messages.append(
+            {
+                "level": "warn",
+                "title": "Açıklık üst sınıra dayandı",
+                "text": "Aerodinamik amaç daha uzun açıklık istiyor olabilir. Yapısal kütle ve rijitlik ayrıca modellenmediği için kök moment sınırı kullanın.",
+            }
+        )
+    worst = max(conditions, key=lambda item: item.get("stall_ratio", 0.0), default=None)
+    if worst and worst["stall_ratio"] > 0.90:
+        messages.append(
+            {
+                "level": "warn",
+                "title": "Düşük hız stall marjı dar",
+                "text": f"{worst['speed_m_s']:.2f} m/s noktasında hedef CL / yakınsayan CLmax = {worst['stall_ratio']:.3f}.",
+            }
+        )
+    if fluid_key in {"fresh_water", "sea_water"} and not hydro.get("enabled"):
+        messages.append(
+            {
+                "level": "warn",
+                "title": "Hidrofoil taraması kapalı",
+                "text": "Kavitasyon ve serbest yüzey ön taraması kullanıcı ayarıyla kapalı; nihai tasarımda çok-fazlı CFD/deney doğrulaması gerekir.",
+            }
+        )
+    if wing["ld"] < 15.0:
+        messages.append(
+            {
+                "level": "warn",
+                "title": "3B L/D düşük",
+                "text": f"Referans hızdaki flow5 panel sonucu L/D = {wing['ld']:.1f}. CDv/CDi ayrımını, Reynolds aralığını ve hedef CL'nin polar içindeki yerini inceleyin.",
+            }
+        )
+    if not wing_meta["feasible"]:
+        messages.append(
+            {
+                "level": "bad",
+                "title": "Bütün akış noktaları fizibil değil",
+                "text": "En az bir hızda stall, viskoz polar ağı veya kök moment koşulu ihlal edildi. Hız/boyut aralığını değiştirin.",
+            }
+        )
+    for label, budget_report in (
+        ("Profil", foil_meta.get("budget_convergence", {})),
+        ("Kanat", wing_meta.get("budget_convergence", {})),
+    ):
+        if budget_report.get("converged") is True:
+            messages.append(
+                {
+                    "level": "good",
+                    "title": f"{label} aday bütçesi yeterli",
+                    "text": (
+                        f"{budget_report.get('evaluations_completed', 0)} gerçek çözümde izlenen "
+                        f"değişim %{float((budget_report.get('checkpoints') or [{}])[-1].get('controlling_change_percent') or 0.0):.3f} ile tolerans içine girdi."
+                    ),
+                }
+            )
+        elif budget_report.get("converged") is False:
+            messages.append(
+                {
+                    "level": "warn",
+                    "title": f"{label} araması bütçe-sınırlı",
+                    "text": (
+                        f"Azami {budget_report.get('maximum_budget', 0)} gerçek çözümde amaç/Pareto cephesi hâlâ hareketli; "
+                        "bütçe çarpanını veya multi-seed sayısını artırın."
+                    ),
+                }
+            )
+    return messages
+
+
+def run_flow5_native_design(
+    *,
+    request: dict[str, Any],
+    fluid: Fluid,
+    fluid_key: str,
+    reference_speed_m_s: float,
+    speed_bounds_m_s: tuple[float, float],
+    speed_samples: int,
+    target_lift_n: float,
+    design_cl_at_reference: float,
+    design_cl_was_auto: bool,
+    reference_chord_m: float,
+    camber_bounds: tuple[float, float],
+    camber_position_bounds: tuple[float, float],
+    thickness_bounds: tuple[float, float],
+    span_bounds: tuple[float, float],
+    root_chord_bounds: tuple[float, float],
+    taper_bounds: tuple[float, float],
+    sweep_bounds: tuple[float, float],
+    twist_bounds: tuple[float, float],
+    alpha_bounds: tuple[float, float],
+    max_root_bending_moment_nm: float | None,
+    settings: Flow5NativeSettings,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    stage_ranges = {
+        "foil_search": (0.01, 0.35),
+        "foil_budget": (0.01, 0.35),
+        "foil_final": (0.35, 0.45),
+        "wing_search": (0.45, 0.75),
+        "wing_budget": (0.45, 0.75),
+        "wing_final": (0.75, 0.87),
+        "mesh_convergence": (0.87, 0.97),
+    }
+
+    active_iteration = 0
+    progress_passes = settings.coupled_iterations + int(
+        settings.spanwise_airfoil_optimization_enabled
+    )
+    last_reported_percent = 0.0
+
+    def report(event: dict[str, Any]) -> None:
+        nonlocal last_reported_percent
+        start, stop = stage_ranges.get(str(event.get("stage")), (0.0, 0.99))
+        fraction = float(event.get("fraction", 0.0))
+        local_fraction = start + (stop - start) * np.clip(fraction, 0.0, 1.0)
+        overall_fraction = (
+            active_iteration + local_fraction
+        ) / max(progress_passes, 1)
+        calculated_percent = float(100.0 * overall_fraction)
+        last_reported_percent = max(last_reported_percent, calculated_percent)
+        payload = {
+            **event,
+            "iteration": active_iteration + 1,
+            "iteration_total": progress_passes,
+            "percent": last_reported_percent,
+        }
+        if progress_callback is not None:
+            progress_callback(payload)
+
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "stage": "initializing",
+                "current": 0,
+                "total": 1,
+                "fraction": 0.0,
+                "percent": 0.0,
+                "message": "flow5 çalışma koşulları hazırlanıyor",
+            }
+        )
+    speeds = _sample_speeds(speed_bounds_m_s, reference_speed_m_s, speed_samples)
+    target_cls = [
+        float(design_cl_at_reference * (reference_speed_m_s / speed) ** 2) for speed in speeds
+    ]
+    runner = Flow5Runner(
+        settings.runner_path,
+        timeout_seconds=settings.timeout_seconds,
+        cache_enabled=settings.cache_enabled,
+        cache_dir=settings.cache_dir or None,
+        cancel_event=cancel_event,
+    )
+    checkpoint_store = OptimizerCheckpointStore(
+        enabled=settings.checkpoint_enabled,
+        directory=settings.checkpoint_dir or None,
+    )
+    try:
+        runner_stat = runner.path.stat()
+        checkpoint_runner_identity: dict[str, Any] = {
+            "path": str(runner.path),
+            "size": runner_stat.st_size,
+            "mtime_ns": runner_stat.st_mtime_ns,
+        }
+    except OSError:
+        checkpoint_runner_identity = {"path": str(runner.path)}
+
+    checkpoint_contract = {
+        "contract": 3,
+        "flow5_api_version": "7.57",
+        "seed": settings.seed,
+        "fluid": fluid.to_dict(),
+        "speeds_m_s": speeds,
+        "reference_speed_m_s": reference_speed_m_s,
+        "target_lift_n": target_lift_n,
+        "alpha_bounds": alpha_bounds,
+        "foil_bounds": {
+            "camber": camber_bounds,
+            "camber_position": camber_position_bounds,
+            "thickness": thickness_bounds,
+            "cst_order": settings.cst_order,
+            "coordinate_points": settings.foil_coordinate_points,
+        },
+        "wing_bounds": {
+            "span": span_bounds,
+            "root_chord": root_chord_bounds,
+            "taper": taper_bounds,
+            "sweep": sweep_bounds,
+            "twist": twist_bounds,
+            "multi_section": settings.multi_section_geometry_enabled,
+            "mid_chord_factor": settings.mid_chord_factor_bounds,
+            "mid_twist": settings.mid_twist_bounds,
+            "max_root_bending_moment_nm": max_root_bending_moment_nm,
+        },
+        "search": {
+            "runner": checkpoint_runner_identity,
+            "threads": settings.threads,
+            "foil_budget": settings.foil_candidate_budget,
+            "wing_budget": settings.wing_candidate_budget,
+            "foil_optimizer": settings.foil_optimizer,
+            "wing_optimizer": settings.wing_optimizer,
+            "method": settings.search_method,
+            "mesh": settings.search_mesh.to_dict(),
+            "alpha_step_deg": settings.alpha_step_search_deg,
+            "ncrit": settings.ncrit,
+            "xtr_top": settings.xtr_top,
+            "xtr_bottom": settings.xtr_bottom,
+            "surrogate": settings.surrogate_settings.to_dict(),
+            "budget_escalation": settings.budget_escalation_settings.to_dict(),
+        },
+        "structure": settings.structural_settings.to_dict(),
+        "hydro": settings.hydro_settings.to_dict(),
+    }
+
+    def checkpoint_key(label: str, payload: dict[str, Any]) -> str:
+        return optimizer_fingerprint(
+            f"flow5-native-v3:{label}",
+            {
+                "problem": checkpoint_contract,
+                "payload": payload,
+            },
+        )
+
+    iteration_profile = settings.baseline_profile
+    iteration_reference_chord = reference_chord_m
+    iteration_target_cls = list(target_cls)
+    iteration_results: list[dict[str, Any]] = []
+    previous_objective: float | None = None
+    coupled_converged = settings.coupled_iterations == 1
+    for iteration in range(settings.coupled_iterations):
+        active_iteration = iteration
+        iteration_seed = settings.seed + 1009 * iteration
+        foil, foil_response, foil_meta, selected_foil_dat_text = optimize_airfoil_with_flow5(
+            runner=runner,
+            baseline_profile=iteration_profile,
+            fluid=fluid,
+            speeds_m_s=speeds,
+            target_cls=iteration_target_cls,
+            reference_chord_m=iteration_reference_chord,
+            camber_bounds=camber_bounds,
+            camber_position_bounds=camber_position_bounds,
+            thickness_bounds=thickness_bounds,
+            alpha_bounds=alpha_bounds,
+            candidate_budget=settings.foil_candidate_budget,
+            seed=iteration_seed,
+            total_threads=settings.threads,
+            cst_order=settings.cst_order,
+            coordinate_points=settings.foil_coordinate_points,
+            minimum_improvement_percent=settings.foil_minimum_improvement_percent,
+            alpha_step_search_deg=settings.alpha_step_search_deg,
+            alpha_step_final_deg=settings.alpha_step_final_deg,
+            ncrit=settings.ncrit,
+            xtr_top=settings.xtr_top,
+            xtr_bottom=settings.xtr_bottom,
+            progress_callback=report,
+            cancel_event=cancel_event,
+            optimizer=settings.foil_optimizer,
+            surrogate_settings=settings.surrogate_settings,
+            budget_escalation_settings=settings.budget_escalation_settings,
+            checkpoint_store=checkpoint_store,
+            checkpoint_key=checkpoint_key(
+                f"foil-coupled-{iteration + 1}",
+                {
+                    "iteration_seed": iteration_seed,
+                    "reference_chord_m": iteration_reference_chord,
+                    "target_cls": iteration_target_cls,
+                    "baseline_identifier": iteration_profile.identifier,
+                    "baseline_dat_sha256": hashlib.sha256(
+                        iteration_profile.solver_dat_text.encode("utf-8")
+                    ).hexdigest(),
+                },
+            ),
+        )
+        wing, baseline, wing_meta, wing_response = optimize_wing_with_flow5(
+            runner=runner,
+            foil=foil,
+            foil_dat_text=selected_foil_dat_text,
+            fluid=fluid,
+            speeds_m_s=speeds,
+            reference_speed_m_s=reference_speed_m_s,
+            target_lift_n=target_lift_n,
+            span_bounds=span_bounds,
+            root_chord_bounds=root_chord_bounds,
+            taper_bounds=taper_bounds,
+            sweep_bounds=sweep_bounds,
+            twist_bounds=twist_bounds,
+            alpha_bounds=alpha_bounds,
+            max_root_bending_moment_nm=max_root_bending_moment_nm,
+            candidate_budget=settings.wing_candidate_budget,
+            finalists=settings.finalists,
+            seed=iteration_seed,
+            total_threads=settings.threads,
+            coordinate_points=settings.foil_coordinate_points,
+            search_method=settings.search_method,
+            final_method=settings.final_method,
+            alpha_step_search_deg=settings.alpha_step_search_deg,
+            alpha_step_final_deg=settings.alpha_step_final_deg,
+            ncrit=settings.ncrit,
+            xtr_top=settings.xtr_top,
+            xtr_bottom=settings.xtr_bottom,
+            search_mesh=settings.search_mesh,
+            final_mesh=settings.final_mesh,
+            convergence_mesh=settings.convergence_mesh,
+            mesh_convergence_enabled=settings.mesh_convergence_enabled,
+            mesh_cd_tolerance_percent=settings.mesh_cd_tolerance_percent,
+            mesh_alpha_tolerance_deg=settings.mesh_alpha_tolerance_deg,
+            progress_callback=report,
+            cancel_event=cancel_event,
+            optimizer=settings.wing_optimizer,
+            multi_section_geometry_enabled=settings.multi_section_geometry_enabled,
+            mid_chord_factor_bounds=settings.mid_chord_factor_bounds,
+            mid_twist_bounds=settings.mid_twist_bounds,
+            structural_settings=settings.structural_settings,
+            hydro_settings=settings.hydro_settings,
+            surrogate_settings=settings.surrogate_settings,
+            budget_escalation_settings=settings.budget_escalation_settings,
+            checkpoint_store=checkpoint_store,
+            checkpoint_key=checkpoint_key(
+                f"wing-coupled-{iteration + 1}",
+                {
+                    "iteration_seed": iteration_seed,
+                    "foil_dat_sha256": hashlib.sha256(
+                        selected_foil_dat_text.encode("utf-8")
+                    ).hexdigest(),
+                    "span_bounds": span_bounds,
+                    "root_chord_bounds": root_chord_bounds,
+                    "taper_bounds": taper_bounds,
+                    "sweep_bounds": sweep_bounds,
+                    "twist_bounds": twist_bounds,
+                },
+            ),
+        )
+        updated_cls = (
+            _representative_section_cls(wing)
+            if design_cl_was_auto
+            else list(iteration_target_cls)
+        )
+        updated_chord = float(wing["geometry"]["mean_aerodynamic_chord"])
+        cl_change = max(
+            (
+                100.0 * abs(new - old) / max(abs(old), 1e-9)
+                for new, old in zip(updated_cls, iteration_target_cls)
+            ),
+            default=0.0,
+        )
+        chord_change = float(
+            100.0
+            * abs(updated_chord - iteration_reference_chord)
+            / max(abs(iteration_reference_chord), 1e-9)
+        )
+        objective = float(wing_meta["objective"])
+        objective_change = (
+            None
+            if previous_objective is None
+            else float(
+                100.0
+                * abs(objective - previous_objective)
+                / max(abs(previous_objective), 1e-12)
+            )
+        )
+        iteration_results.append(
+            {
+                "iteration": iteration + 1,
+                "foil": foil,
+                "foil_response": foil_response,
+                "foil_meta": foil_meta,
+                "foil_dat_text": selected_foil_dat_text,
+                "baseline_profile": iteration_profile,
+                "wing": wing,
+                "rectangular_baseline": baseline,
+                "wing_meta": wing_meta,
+                "wing_response": wing_response,
+                "reference_chord_m": iteration_reference_chord,
+                "target_cls": list(iteration_target_cls),
+                "next_reference_chord_m": updated_chord,
+                "next_target_cls": updated_cls,
+                "cl_schedule_change_percent": float(cl_change),
+                "reference_chord_change_percent": chord_change,
+                "objective_change_percent": objective_change,
+            }
+        )
+        if (
+            iteration > 0
+            and cl_change <= settings.coupling_cl_tolerance_percent
+            and objective_change is not None
+            and objective_change <= settings.coupling_objective_tolerance_percent
+        ):
+            coupled_converged = True
+            break
+        if iteration + 1 >= settings.coupled_iterations:
+            break
+        previous_objective = objective
+        iteration_reference_chord = updated_chord
+        iteration_target_cls = updated_cls
+        iteration_profile = build_derived_baseline_profile(
+            foil,
+            selected_foil_dat_text,
+            identifier=f"coupled_iteration_{iteration + 1}",
+            display_name=f"Bağlı iterasyon {iteration + 1} profili",
+            solver_point_count=settings.foil_coordinate_points,
+        )
+
+    selected_iteration = min(
+        iteration_results,
+        key=lambda item: (
+            not bool(item["wing_meta"]["feasible"]),
+            float(item["wing_meta"]["objective"]),
+        ),
+    )
+    foil = selected_iteration["foil"]
+    foil_response = selected_iteration["foil_response"]
+    foil_meta = selected_iteration["foil_meta"]
+    selected_foil_dat_text = selected_iteration["foil_dat_text"]
+    baseline_profile = selected_iteration["baseline_profile"]
+    wing = selected_iteration["wing"]
+    baseline = selected_iteration["rectangular_baseline"]
+    wing_meta = selected_iteration["wing_meta"]
+    wing_response = selected_iteration["wing_response"]
+    target_cls = selected_iteration["target_cls"]
+    coupling_history = [
+        {
+            "iteration": int(item["iteration"]),
+            "foil_name": item["foil"].name,
+            "foil_objective": float(item["foil_meta"]["objective"]),
+            "wing_objective": float(item["wing_meta"]["objective"]),
+            "feasible": bool(item["wing_meta"]["feasible"]),
+            "reference_chord_m": float(item["reference_chord_m"]),
+            "target_cls": item["target_cls"],
+            "next_reference_chord_m": float(item["next_reference_chord_m"]),
+            "next_target_cls": item["next_target_cls"],
+            "cl_schedule_change_percent": float(item["cl_schedule_change_percent"]),
+            "reference_chord_change_percent": float(
+                item["reference_chord_change_percent"]
+            ),
+            "objective_change_percent": item["objective_change_percent"],
+            "selected": item is selected_iteration,
+        }
+        for item in iteration_results
+    ]
+
+    section_foils: tuple[
+        CSTAirfoilDesign, CSTAirfoilDesign, CSTAirfoilDesign
+    ] | None = None
+    section_foil_dat_texts: tuple[str, str, str] | None = None
+    spanwise_airfoil_meta: dict[str, Any] = {
+        "enabled": settings.spanwise_airfoil_optimization_enabled,
+        "performed": False,
+        "selected": False,
+        "station_count": 1,
+        "profiles": [{"station": "root", "name": foil.name, "eta": 0.0}],
+    }
+    if settings.spanwise_airfoil_optimization_enabled:
+        active_iteration = settings.coupled_iterations
+        station_budget = max(
+            8,
+            int(round(settings.foil_candidate_budget * settings.spanwise_foil_budget_fraction)),
+        )
+        derived_profile = build_derived_baseline_profile(
+            foil,
+            selected_foil_dat_text,
+            identifier="spanwise_root_seed",
+            display_name="Bağlı tasarım kök profili",
+            solver_point_count=settings.foil_coordinate_points,
+        )
+        optimized_sections: list[tuple[str, float, CSTAirfoilDesign, str, dict[str, Any]]] = []
+        for station_index, (station_name, eta) in enumerate((("mid", 0.50), ("tip", 0.85))):
+            station_cls = _span_station_cls(wing, eta)
+            station_chord = float(
+                WingGeometry(
+                    wing["geometry"]["span"],
+                    wing["geometry"]["root_chord"],
+                    wing["geometry"]["taper"],
+                    wing["geometry"]["sweep_deg"],
+                    wing["geometry"]["tip_twist_deg"],
+                    wing["geometry"]["alpha_deg"],
+                    wing["geometry"].get("mid_chord_factor", 1.0),
+                    wing["geometry"].get("mid_twist_deg"),
+                ).chord_at(eta)
+            )
+            station_foil, _, station_meta, station_dat = optimize_airfoil_with_flow5(
+                runner=runner,
+                baseline_profile=derived_profile,
+                fluid=fluid,
+                speeds_m_s=speeds,
+                target_cls=station_cls,
+                reference_chord_m=station_chord,
+                camber_bounds=camber_bounds,
+                camber_position_bounds=camber_position_bounds,
+                thickness_bounds=thickness_bounds,
+                alpha_bounds=alpha_bounds,
+                candidate_budget=station_budget,
+                seed=settings.seed + 7001 + station_index * 379,
+                total_threads=settings.threads,
+                cst_order=settings.cst_order,
+                coordinate_points=settings.foil_coordinate_points,
+                minimum_improvement_percent=settings.foil_minimum_improvement_percent,
+                alpha_step_search_deg=settings.alpha_step_search_deg,
+                alpha_step_final_deg=settings.alpha_step_final_deg,
+                ncrit=settings.ncrit,
+                xtr_top=settings.xtr_top,
+                xtr_bottom=settings.xtr_bottom,
+                progress_callback=report,
+                cancel_event=cancel_event,
+                optimizer=settings.foil_optimizer,
+                surrogate_settings=settings.surrogate_settings,
+                budget_escalation_settings=settings.budget_escalation_settings,
+                checkpoint_store=checkpoint_store,
+                checkpoint_key=checkpoint_key(
+                    f"foil-spanwise-{station_name}",
+                    {
+                        "seed": settings.seed + 7001 + station_index * 379,
+                        "station": station_name,
+                        "station_chord_m": station_chord,
+                        "target_cls": station_cls,
+                        "baseline_dat_sha256": hashlib.sha256(
+                            derived_profile.solver_dat_text.encode("utf-8")
+                        ).hexdigest(),
+                    },
+                ),
+            )
+            station_foil, station_dat = _rename_section_foil(
+                station_foil, station_dat, station_name.capitalize()
+            )
+            optimized_sections.append(
+                (station_name, eta, station_foil, station_dat, station_meta)
+            )
+
+        mid_foil = optimized_sections[0][2]
+        tip_foil = optimized_sections[1][2]
+        proposed_section_foils = (foil, mid_foil, tip_foil)
+        proposed_section_dats = (
+            selected_foil_dat_text,
+            optimized_sections[0][3],
+            optimized_sections[1][3],
+        )
+        initial_geometry = WingGeometry(
+            wing["geometry"]["span"],
+            wing["geometry"]["root_chord"],
+            wing["geometry"]["taper"],
+            wing["geometry"]["sweep_deg"],
+            wing["geometry"]["tip_twist_deg"],
+            wing["geometry"]["alpha_deg"],
+            wing["geometry"].get("mid_chord_factor", 1.0),
+            wing["geometry"].get("mid_twist_deg"),
+        )
+        refined_wing, refined_baseline, refined_meta, refined_response = optimize_wing_with_flow5(
+            runner=runner,
+            foil=foil,
+            foil_dat_text=selected_foil_dat_text,
+            fluid=fluid,
+            speeds_m_s=speeds,
+            reference_speed_m_s=reference_speed_m_s,
+            target_lift_n=target_lift_n,
+            span_bounds=span_bounds,
+            root_chord_bounds=root_chord_bounds,
+            taper_bounds=taper_bounds,
+            sweep_bounds=sweep_bounds,
+            twist_bounds=twist_bounds,
+            alpha_bounds=alpha_bounds,
+            max_root_bending_moment_nm=max_root_bending_moment_nm,
+            candidate_budget=settings.wing_candidate_budget,
+            finalists=settings.finalists,
+            seed=settings.seed + 8093,
+            total_threads=settings.threads,
+            coordinate_points=settings.foil_coordinate_points,
+            search_method=settings.search_method,
+            final_method=settings.final_method,
+            alpha_step_search_deg=settings.alpha_step_search_deg,
+            alpha_step_final_deg=settings.alpha_step_final_deg,
+            ncrit=settings.ncrit,
+            xtr_top=settings.xtr_top,
+            xtr_bottom=settings.xtr_bottom,
+            search_mesh=settings.search_mesh,
+            final_mesh=settings.final_mesh,
+            convergence_mesh=settings.convergence_mesh,
+            mesh_convergence_enabled=settings.mesh_convergence_enabled,
+            mesh_cd_tolerance_percent=settings.mesh_cd_tolerance_percent,
+            mesh_alpha_tolerance_deg=settings.mesh_alpha_tolerance_deg,
+            progress_callback=report,
+            cancel_event=cancel_event,
+            optimizer=settings.wing_optimizer,
+            multi_section_geometry_enabled=settings.multi_section_geometry_enabled,
+            mid_chord_factor_bounds=settings.mid_chord_factor_bounds,
+            mid_twist_bounds=settings.mid_twist_bounds,
+            section_foils=proposed_section_foils,
+            section_foil_dat_texts=proposed_section_dats,
+            structural_settings=settings.structural_settings,
+            hydro_settings=settings.hydro_settings,
+            initial_geometry=initial_geometry,
+            surrogate_settings=settings.surrogate_settings,
+            budget_escalation_settings=settings.budget_escalation_settings,
+            checkpoint_store=checkpoint_store,
+            checkpoint_key=checkpoint_key(
+                "wing-spanwise-refinement",
+                {
+                    "seed": settings.seed + 8093,
+                    "foil_dat_sha256": [
+                        hashlib.sha256(text.encode("utf-8")).hexdigest()
+                        for text in proposed_section_dats
+                    ],
+                    "initial_geometry": initial_geometry.to_dict(),
+                },
+            ),
+        )
+        base_objective = float(wing_meta["objective"])
+        refined_objective = float(refined_meta["objective"])
+        accepted = bool(
+            refined_meta["feasible"]
+            and (
+                not wing_meta["feasible"]
+                or refined_objective
+                <= base_objective
+                * (1.0 + settings.spanwise_foil_acceptance_tolerance_percent / 100.0)
+            )
+        )
+        spanwise_airfoil_meta = {
+            "enabled": True,
+            "performed": True,
+            "selected": accepted,
+            "station_count": 3,
+            "station_candidate_budget": station_budget,
+            "base_wing_objective": base_objective,
+            "three_profile_wing_objective": refined_objective,
+            "acceptance_tolerance_percent": settings.spanwise_foil_acceptance_tolerance_percent,
+            "profiles": [
+                {"station": "root", "eta": 0.0, "name": foil.name},
+                *[
+                    {
+                        "station": item[0],
+                        "eta": item[1],
+                        "name": item[2].name,
+                        "objective": float(item[4]["objective"]),
+                        "target_cls": _span_station_cls(wing, item[1]),
+                    }
+                    for item in optimized_sections
+                ],
+            ],
+        }
+        if accepted:
+            section_foils = proposed_section_foils
+            section_foil_dat_texts = proposed_section_dats
+            wing = refined_wing
+            baseline = refined_baseline
+            wing_meta = refined_meta
+            wing_response = refined_response
+        wing_meta["spanwise_airfoil_refinement"] = spanwise_airfoil_meta
+
+    reference_polar = min(
+        foil_response["polars"], key=lambda polar: abs(polar["speed_m_s"] - reference_speed_m_s)
+    )
+    reference_foil_condition = min(
+        foil_meta["conditions"],
+        key=lambda item: abs(item["speed_m_s"] - reference_speed_m_s),
+    )
+    if foil_meta["selection"]["selected_baseline"]:
+        x = np.asarray(baseline_profile.solver_x, dtype=float)
+        y = np.asarray(baseline_profile.solver_y, dtype=float)
+    else:
+        x, y = airfoil_coordinates(foil, total_points=settings.foil_coordinate_points)
+    result: dict[str, Any] = {
+        "status": (
+            "feasible"
+            if wing_meta["feasible"]
+            and (settings.coupled_iterations <= 1 or coupled_converged)
+            and foil_meta.get("budget_convergence", {}).get("converged") is not False
+            and wing_meta.get("budget_convergence", {}).get("converged") is not False
+            else "review"
+        ),
+        "flow5_native": True,
+        "model": {
+            "airfoil": (
+                f"{baseline_profile.display_name} baseline + CST{settings.cst_order}/Kulfan geometry; "
+                "every objective value from flow5 embedded XFoil"
+            ),
+            "wing": f"flow5 {wing_meta['search_method']} search + {wing_meta['final_method']} final; viscous on-the-fly",
+            "scope": "flow5 potential-flow preliminary design over multiple operating points",
+        },
+        "solver_run": {
+            "strategy_requested": "flow5_native",
+            "strategy_used": "flow5_native",
+            "aerodynamic_score_source": "flow5 only",
+            "flow5_threads": settings.threads,
+            "speed_samples": speed_samples,
+            "foil_candidate_budget": settings.foil_candidate_budget,
+            "foil_coordinate_points": settings.foil_coordinate_points,
+            "baseline_airfoil": baseline_profile.identifier,
+            "cst_order": settings.cst_order,
+            "wing_candidate_budget": settings.wing_candidate_budget,
+            "budget_escalation": settings.budget_escalation_settings.to_dict(),
+            "foil_budget_convergence": foil_meta.get("budget_convergence", {}),
+            "wing_budget_convergence": wing_meta.get("budget_convergence", {}),
+            "search_method": settings.search_method.upper(),
+            "final_method": settings.final_method.upper(),
+            "mesh_convergence_enabled": settings.mesh_convergence_enabled,
+            "output_mesh": wing_meta["output_mesh"],
+            "foil_optimizer": settings.foil_optimizer,
+            "wing_optimizer": settings.wing_optimizer,
+            "coupled_iterations_requested": settings.coupled_iterations,
+            "coupled_iterations_completed": len(coupling_history),
+            "selected_coupled_iteration": int(selected_iteration["iteration"]),
+            "solver": wing_meta.get("solver", {}),
+            "evaluation_cache": runner.cache_stats(),
+            "optimizer_checkpoint": checkpoint_store.stats(),
+            "surrogate": {
+                "foil": foil_meta.get("surrogate", {}),
+                "wing": wing_meta.get("surrogate", {}),
+            },
+        },
+        "flow": {
+            **fluid.to_dict(),
+            "speed_m_s": reference_speed_m_s,
+            "speed_min_m_s": speed_bounds_m_s[0],
+            "speed_max_m_s": speed_bounds_m_s[1],
+            "speed_samples": speed_samples,
+            "sampled_speeds_m_s": speeds,
+            "target_lift_n": target_lift_n,
+            "dynamic_pressure_pa": fluid.dynamic_pressure(reference_speed_m_s),
+            "mach": fluid.mach(reference_speed_m_s),
+        },
+        "airfoil": foil.to_dict(),
+        "baseline_airfoil": foil_meta["baseline"],
+        "airfoil_optimization": {
+            **foil_meta,
+            "design_cl_was_auto": design_cl_was_auto,
+            "design_cl_at_reference": design_cl_at_reference,
+            "target_cls": target_cls,
+            "reynolds": reference_polar["reynolds"],
+            "mach": reference_polar["mach"],
+            "target_cl": reference_foil_condition["target_cl"],
+            "design_alpha_deg": reference_foil_condition["point"]["alpha_deg"],
+            "design_point": reference_foil_condition["point"],
+            "final_cruise_point": reference_foil_condition["point"],
+            "cl_max_estimate": reference_foil_condition["cl_max_converged"],
+        },
+        "airfoil_coordinates": [
+            {"x_over_c": float(xi), "y_over_c": float(yi)} for xi, yi in zip(x, y)
+        ],
+        "polar": reference_polar["points"],
+        "foil_polars": foil_response["polars"],
+        "polar_source": "flow5 embedded XFoil",
+        "wing": wing,
+        "wing_cases": wing["conditions"],
+        "rectangular_baseline": baseline,
+        "wing_optimization": wing_meta,
+        "structural_analysis": wing.get(
+            "structural",
+            {"enabled": False, "performed": False, "passed": True},
+        ),
+        "hydro_analysis": wing.get(
+            "hydro",
+            {"enabled": False, "performed": False, "passed": True},
+        ),
+        "coupled_design": {
+            "enabled": settings.coupled_iterations > 1,
+            "converged": bool(coupled_converged),
+            "iterations_requested": settings.coupled_iterations,
+            "iterations_completed": len(coupling_history),
+            "selected_iteration": int(selected_iteration["iteration"]),
+            "cl_tolerance_percent": settings.coupling_cl_tolerance_percent,
+            "objective_tolerance_percent": settings.coupling_objective_tolerance_percent,
+            "explicit_design_cl_locked": not design_cl_was_auto,
+            "history": coupling_history,
+        },
+        "spanwise_airfoil_optimization": spanwise_airfoil_meta,
+        "pareto_analysis": wing_meta.get("pareto_analysis", {}),
+        "flow5_native_analysis": {
+            "foil_solver": "flow5::XFoilTask",
+            "foil_coordinate_points": settings.foil_coordinate_points,
+            "wing_solver_search": wing_meta["search_method"],
+            "wing_solver_final": wing_meta["final_method"],
+            "viscous_drag": "flow5 on-the-fly embedded XFoil",
+            "solver": wing_meta.get("solver", {}),
+            "foil_conditions": foil_meta["conditions"],
+            "wing_conditions": wing_meta["conditions"],
+            "solver_telemetry": wing_meta["solver_telemetry"],
+            "mesh_convergence": wing_meta["mesh_convergence"],
+            "evaluation_cache": runner.cache_stats(),
+            "optimizer_checkpoint": checkpoint_store.stats(),
+            "surrogate": {
+                "foil": foil_meta.get("surrogate", {}),
+                "wing": wing_meta.get("surrogate", {}),
+            },
+            "spanwise_airfoils": spanwise_airfoil_meta,
+        },
+    }
+    result["insights"] = _native_insights(
+        wing=wing,
+        wing_meta=wing_meta,
+        foil_meta=foil_meta,
+        fluid_key=fluid_key,
+        span_upper=span_bounds[1],
+        coupled_design=result["coupled_design"],
+    )
+
+    geometry = WingGeometry(
+        wing["geometry"]["span"],
+        wing["geometry"]["root_chord"],
+        wing["geometry"]["taper"],
+        wing["geometry"]["sweep_deg"],
+        wing["geometry"]["tip_twist_deg"],
+        wing["geometry"]["alpha_deg"],
+        wing["geometry"].get("mid_chord_factor", 1.0),
+        wing["geometry"].get("mid_twist_deg"),
+    )
+    foil_text = selected_foil_dat_text
+    output_mesh = wing_meta["output_mesh"]
+    plane_text = flow5_plane_xml(
+        foil,
+        geometry,
+        chordwise_panels=int(output_mesh["chordwise_panels"]),
+        half_span_panels=int(output_mesh["half_span_panels"]),
+        section_foils=section_foils,
+    )
+    analysis_text = flow5_analysis_xml(
+        geometry,
+        fluid,
+        reference_speed_m_s,
+        settings.final_method,
+        ncrit=settings.ncrit,
+        xtr_top=settings.xtr_top,
+        xtr_bottom=settings.xtr_bottom,
+    )
+    obj_text = wing_obj(foil, geometry, section_foils=section_foils)
+    results_text = flow5_native_results_csv(foil, wing)
+    polar_text = xfoil_polar_csv(reference_polar["points"])
+    project_payload = wing_response.get("artifact_payloads", {}).get("project_fl5")
+    if not project_payload:
+        raise RuntimeError("flow5 son analizi tamamladı ancak çözümlenmiş .fl5 proje artifact'i üretmedi")
+    flow5_project_bytes = base64.b64decode(project_payload["base64"])
+    snapshot = deepcopy(result)
+    project_text = project_json(request, snapshot)
+    bundle = flow5_bundle_bytes(
+        foil_dat_text=foil_text,
+        plane_xml_text=plane_text,
+        wing_obj_text=obj_text,
+        results_csv_text=results_text,
+        project_json_text=project_text,
+        polar_csv_text=polar_text,
+        analysis_xml_text=analysis_text,
+        flow5_project_bytes=flow5_project_bytes,
+        section_foil_dat_texts=section_foil_dat_texts,
+    )
+    result["exports"] = {
+        "airfoil_filename": f"{foil.name}.dat",
+        "airfoil_dat": foil_text,
+        "plane_filename": "aeropt-wing.xml",
+        "plane_xml": plane_text,
+        "analysis_filename": "aeropt-analysis.xml",
+        "analysis_xml": analysis_text,
+        "wing_obj_filename": "aeropt-wing.obj",
+        "wing_obj": obj_text,
+        "results_filename": "aeropt-flow5-results.csv",
+        "results_csv": results_text,
+        "project_filename": "aeropt-project.json",
+        "project_json": project_text,
+        "xfoil_polar_filename": "flow5-xfoil-polar.csv",
+        "xfoil_polar_csv": polar_text,
+        "flow5_project_filename": "aeropt-optimized.fl5",
+        "flow5_project_base64": project_payload["base64"],
+        "flow5_bundle_filename": "aeropt-flow5-native-package.zip",
+        "flow5_bundle_base64": base64.b64encode(bundle).decode("ascii"),
+        "section_airfoils": (
+            [
+                {
+                    "station": station,
+                    "filename": f"aeropt-airfoil-{station}.dat",
+                    "airfoil_dat": dat_text,
+                }
+                for station, dat_text in zip(
+                    ("root", "mid", "tip"), section_foil_dat_texts
+                )
+            ]
+            if section_foil_dat_texts is not None
+            else []
+        ),
+    }
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "stage": "completed",
+                "current": 1,
+                "total": 1,
+                "fraction": 1.0,
+                "percent": 100.0,
+                "message": "Optimizasyon ve flow5 paketi tamamlandı",
+            }
+        )
+    return result
