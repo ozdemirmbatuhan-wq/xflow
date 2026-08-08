@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aeropt"
+version = "0.8.0"
+description = "Reliable flow5-native CST airfoil and wing optimizer with Pareto, checkpoint and validation UI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=2.0,<3",
+  "scipy>=1.14,<2",
+]
+
+[tool.setuptools.packages.find]
+include = ["aeropt*"]
+
+[tool.setuptools]
+include-package-data = true
