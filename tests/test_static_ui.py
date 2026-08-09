@@ -34,6 +34,22 @@ class StaticUiContractTests(unittest.TestCase):
         ):
             self.assertIn(f'id="{identifier}"', html)
 
+    def test_foil_and_wing_workflows_are_selectable_and_reusable(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        for identifier in (
+            "optimizationMode",
+            "wingAirfoilSource",
+            "wingAirfoilDatFile",
+            "savedAirfoilStatus",
+        ):
+            self.assertIn(f'id="{identifier}"', html)
+        for mode in ("coupled", "foil_only", "wing_only"):
+            self.assertIn(f'value="{mode}"', html)
+        self.assertIn('workflow: { mode: workflowMode }', javascript)
+        self.assertIn('aeropt.savedAirfoil.v1', javascript)
+        self.assertIn('result.workflow_mode === "foil_only"', javascript)
+
     def test_design_form_uses_application_validation(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
         javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
@@ -43,6 +59,22 @@ class StaticUiContractTests(unittest.TestCase):
         self.assertIn('if (raw === "")', javascript)
         self.assertIn('if (input.min !== "")', javascript)
         self.assertIn('if (input.max !== "")', javascript)
+
+    def test_number_inputs_accept_free_continuous_values_or_plain_integers(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        number_inputs = re.findall(r'<input\b[^>]*type="number"[^>]*>', html)
+        target_lift = next(tag for tag in number_inputs if 'id="targetLift"' in tag)
+        self.assertIn('step="any"', target_lift)
+        for tag in number_inputs:
+            step_match = re.search(r'\bstep="([^"]+)"', tag)
+            if step_match is None:
+                continue
+            step = step_match.group(1)
+            self.assertIn(step, {"any", "1"}, tag)
+            if step == "1":
+                minimum = re.search(r'\bmin="([^"]+)"', tag)
+                if minimum is not None:
+                    self.assertTrue(float(minimum.group(1)).is_integer(), tag)
 
     def test_packaged_ui_smoke_is_part_of_windows_workflow(self):
         workflow = (ROOT / ".github" / "workflows" / "build-windows-flow5.yml").read_text(
