@@ -26,6 +26,32 @@
 
         <form id="designForm" novalidate>
           <section class="form-section open">
+            <div class="section-heading"><span class="step">00</span><div><h2>Çalışma modu</h2><p>Profil ve kanat aşamalarını ayırır</p></div></div>
+            <div class="field full">
+              <label for="optimizationMode">Çalıştırılacak aşama</label>
+              <select id="optimizationMode">
+                <option value="coupled" selected>Profil + kanat · bağlı optimizasyon</option>
+                <option value="foil_only">Yalnız profil optimizasyonu</option>
+                <option value="wing_only">Yalnız kanat optimizasyonu</option>
+              </select>
+            </div>
+            <div id="wingAirfoilFields" class="hidden">
+              <div class="field full">
+                <label for="wingAirfoilSource">Kanatta kullanılacak profil</label>
+                <select id="wingAirfoilSource">
+                  <option value="saved" selected>Son optimize edilen profil</option>
+                  <option value="file">DAT dosyası seç</option>
+                </select>
+              </div>
+              <p id="savedAirfoilStatus" class="solver-help">Henüz bu tarayıcıda kaydedilmiş optimize profil yok.</p>
+              <div id="wingAirfoilFileField" class="field full hidden">
+                <label for="wingAirfoilDatFile">Kanat profili <em>.dat</em></label>
+                <input id="wingAirfoilDatFile" type="file" accept=".dat,.txt,text/plain">
+              </div>
+            </div>
+          </section>
+
+          <section class="form-section open">
             <div class="section-heading"><span class="step">01</span><div><h2>Akış ve hedef</h2><p>Çalışma noktasını belirler</p></div></div>
             <div class="field full">
               <label for="fluid">Akışkan</label>
@@ -37,53 +63,53 @@
               </select>
             </div>
             <div class="field-grid two">
-              <div class="field"><label for="speed">Referans hız <em>m/s</em></label><input id="speed" type="number" min="0.05" step="0.1" value="18"></div>
-              <div class="field"><label for="targetLift">Hedef taşıma <em>N</em></label><input id="targetLift" type="number" min="0.01" step="1" value="120"></div>
-              <div class="field"><label for="speedMin">Minimum hız <em>m/s</em></label><input id="speedMin" type="number" min="0.05" step="0.1" value="14"></div>
-              <div class="field"><label for="speedMax">Maksimum hız <em>m/s</em></label><input id="speedMax" type="number" min="0.05" step="0.1" value="22"></div>
+              <div class="field"><label for="speed">Referans hız <em>m/s</em></label><input id="speed" type="number" min="0.05" step="any" value="18"></div>
+              <div class="field"><label for="targetLift">Hedef taşıma <em>N</em></label><input id="targetLift" type="number" min="0.01" step="any" value="120"></div>
+              <div class="field"><label for="speedMin">Minimum hız <em>m/s</em></label><input id="speedMin" type="number" min="0.05" step="any" value="14"></div>
+              <div class="field"><label for="speedMax">Maksimum hız <em>m/s</em></label><input id="speedMax" type="number" min="0.05" step="any" value="22"></div>
               <div class="field"><label for="speedSamples">Akış noktası</label><input id="speedSamples" type="number" min="3" max="9" step="1" value="5"></div>
               <div class="field"><label for="density">Yoğunluk <em>kg/m³</em></label><input id="density" type="number" min="0.000001" step="any" value="1.225"></div>
               <div class="field"><label for="viscosity">Dinamik viskozite <em>Pa·s</em></label><input id="viscosity" type="number" min="0.0000000001" step="any" value="0.000017894"></div>
             </div>
-            <div class="field full subtle-field"><label for="soundSpeed">Ses hızı <em>m/s</em></label><input id="soundSpeed" type="number" min="1" step="0.1" value="340.3"></div>
+            <div class="field full subtle-field"><label for="soundSpeed">Ses hızı <em>m/s</em></label><input id="soundSpeed" type="number" min="1" step="any" value="340.3"></div>
           </section>
 
-          <section class="form-section">
+          <section id="wingEnvelopeSection" class="form-section">
             <div class="section-heading"><span class="step">02</span><div><h2>Boyut zarfı</h2><p>Kanadın fiziksel sınırları</p></div></div>
             <div class="range-block">
               <span class="range-label">Tam açıklık <em>m</em></span>
-              <div class="range-pair"><label>Min<input id="spanMin" type="number" min="0.02" step="0.05" value="1"></label><span>—</span><label>Max<input id="spanMax" type="number" min="0.02" step="0.05" value="3"></label></div>
+              <div class="range-pair"><label>Min<input id="spanMin" type="number" min="0.02" step="any" value="1"></label><span>—</span><label>Max<input id="spanMax" type="number" min="0.02" step="any" value="3"></label></div>
             </div>
             <div class="range-block">
               <span class="range-label">Kök chord <em>m</em></span>
-              <div class="range-pair"><label>Min<input id="chordMin" type="number" min="0.005" step="0.01" value="0.12"></label><span>—</span><label>Max<input id="chordMax" type="number" min="0.005" step="0.01" value="0.50"></label></div>
+              <div class="range-pair"><label>Min<input id="chordMin" type="number" min="0.005" step="any" value="0.12"></label><span>—</span><label>Max<input id="chordMax" type="number" min="0.005" step="any" value="0.50"></label></div>
             </div>
             <div class="range-block">
               <span class="range-label">Taper oranı <em>c<sub>tip</sub>/c<sub>root</sub></em></span>
-              <div class="range-pair"><label>Min<input id="taperMin" type="number" min="0.08" max="1.2" step="0.05" value="0.25"></label><span>—</span><label>Max<input id="taperMax" type="number" min="0.08" max="1.2" step="0.05" value="1"></label></div>
+              <div class="range-pair"><label>Min<input id="taperMin" type="number" min="0.08" max="1.2" step="any" value="0.25"></label><span>—</span><label>Max<input id="taperMax" type="number" min="0.08" max="1.2" step="any" value="1"></label></div>
             </div>
             <div class="range-block">
               <span class="range-label">¼-chord sweep <em>°</em></span>
-              <div class="range-pair"><label>Min<input id="sweepMin" type="number" min="-15" max="55" step="1" value="0"></label><span>—</span><label>Max<input id="sweepMax" type="number" min="-15" max="55" step="1" value="20"></label></div>
+              <div class="range-pair"><label>Min<input id="sweepMin" type="number" min="-15" max="55" step="any" value="0"></label><span>—</span><label>Max<input id="sweepMax" type="number" min="-15" max="55" step="any" value="20"></label></div>
             </div>
             <div class="range-block">
               <span class="range-label">Uç twist <em>°</em></span>
-              <div class="range-pair"><label>Min<input id="twistMin" type="number" min="-12" max="8" step="0.5" value="-5"></label><span>—</span><label>Max<input id="twistMax" type="number" min="-12" max="8" step="0.5" value="0"></label></div>
+              <div class="range-pair"><label>Min<input id="twistMin" type="number" min="-12" max="8" step="any" value="-5"></label><span>—</span><label>Max<input id="twistMax" type="number" min="-12" max="8" step="any" value="0"></label></div>
             </div>
             <label class="switch-row"><input id="multiSectionGeometry" type="checkbox" checked><span></span><b>Üç kesitli planformu optimize et</b><em>orta chord + orta twist</em></label>
             <div id="multiSectionFields">
               <div class="range-block">
                 <span class="range-label">Orta chord faktörü <em>doğrusal chord'a oran</em></span>
-                <div class="range-pair"><label>Min<input id="midChordFactorMin" type="number" min="0.5" max="1.5" step="0.025" value="0.85"></label><span>—</span><label>Max<input id="midChordFactorMax" type="number" min="0.5" max="1.5" step="0.025" value="1.15"></label></div>
+                <div class="range-pair"><label>Min<input id="midChordFactorMin" type="number" min="0.5" max="1.5" step="any" value="0.85"></label><span>—</span><label>Max<input id="midChordFactorMax" type="number" min="0.5" max="1.5" step="any" value="1.15"></label></div>
               </div>
               <div class="range-block">
                 <span class="range-label">Orta twist <em>°</em></span>
-                <div class="range-pair"><label>Min<input id="midTwistMin" type="number" min="-12" max="8" step="0.25" value="-4"></label><span>—</span><label>Max<input id="midTwistMax" type="number" min="-12" max="8" step="0.25" value="1"></label></div>
+                <div class="range-pair"><label>Min<input id="midTwistMin" type="number" min="-12" max="8" step="any" value="-4"></label><span>—</span><label>Max<input id="midTwistMax" type="number" min="-12" max="8" step="any" value="1"></label></div>
               </div>
             </div>
           </section>
 
-          <section class="form-section">
+          <section id="profileEnvelopeSection" class="form-section">
             <div class="section-heading"><span class="step">03</span><div><h2>Profil zarfı</h2><p>Sürekli CST/Kulfan eğri sınırları</p></div></div>
             <div class="field full">
               <label for="baselineAirfoil">Başlangıç profili</label>
@@ -102,19 +128,19 @@
             </div>
             <div class="range-block">
               <span class="range-label">Maks. camber <em>% chord</em></span>
-              <div class="range-pair"><label>Min<input id="camberMin" type="number" min="0" max="9" step="0.25" value="0"></label><span>—</span><label>Max<input id="camberMax" type="number" min="0" max="9" step="0.25" value="6"></label></div>
+              <div class="range-pair"><label>Min<input id="camberMin" type="number" min="0" max="9" step="any" value="0"></label><span>—</span><label>Max<input id="camberMax" type="number" min="0" max="9" step="any" value="6"></label></div>
             </div>
             <div class="range-block">
               <span class="range-label">Camber konumu <em>% chord</em></span>
-              <div class="range-pair"><label>Min<input id="camberPosMin" type="number" min="10" max="85" step="1" value="20"></label><span>—</span><label>Max<input id="camberPosMax" type="number" min="10" max="85" step="1" value="80"></label></div>
+              <div class="range-pair"><label>Min<input id="camberPosMin" type="number" min="10" max="85" step="any" value="20"></label><span>—</span><label>Max<input id="camberPosMax" type="number" min="10" max="85" step="any" value="80"></label></div>
             </div>
             <div class="range-block">
               <span class="range-label">Kalınlık <em>% chord</em></span>
-              <div class="range-pair"><label>Min<input id="thicknessMin" type="number" min="5" max="24" step="0.5" value="7"></label><span>—</span><label>Max<input id="thicknessMax" type="number" min="5" max="24" step="0.5" value="18"></label></div>
+              <div class="range-pair"><label>Min<input id="thicknessMin" type="number" min="5" max="24" step="any" value="7"></label><span>—</span><label>Max<input id="thicknessMax" type="number" min="5" max="24" step="any" value="18"></label></div>
             </div>
             <div class="field full">
               <label for="designCl">Profil tasarım C<sub>L</sub> <em>boş = otomatik</em></label>
-              <input id="designCl" type="number" min="0.1" max="1.6" step="0.05" placeholder="Otomatik">
+              <input id="designCl" type="number" min="0.1" max="1.6" step="any" placeholder="Otomatik">
             </div>
           </section>
 
@@ -123,41 +149,41 @@
             <div class="advanced-body">
               <div class="range-block">
                 <span class="range-label">Hücum açısı <em>°</em></span>
-                <div class="range-pair"><label>Min<input id="alphaMin" type="number" min="-15" max="25" step="0.5" value="-2"></label><span>—</span><label>Max<input id="alphaMax" type="number" min="-15" max="25" step="0.5" value="12"></label></div>
+                <div class="range-pair"><label>Min<input id="alphaMin" type="number" min="-15" max="25" step="any" value="-2"></label><span>—</span><label>Max<input id="alphaMax" type="number" min="-15" max="25" step="any" value="12"></label></div>
               </div>
-              <div class="field full"><label for="maxBending">Maks. kök momenti <em>N·m · 0 = kapalı</em></label><input id="maxBending" type="number" min="0" step="1" value="0"></div>
+              <div class="field full"><label for="maxBending">Maks. kök momenti <em>N·m · 0 = kapalı</em></label><input id="maxBending" type="number" min="0" step="any" value="0"></div>
               <div class="field full"><label for="airfoilStrategy">Aerodinamik çözüm zinciri</label><select id="airfoilStrategy"><option value="flow5_native" selected>flow5-native · AeroOpt modeli kullanma</option><option value="auto">Legacy otomatik · XFOIL/AeroOpt</option><option value="internal">Legacy yalnız AeroOpt</option><option value="xfoil_closed_loop">Legacy XFOIL kontrolü</option><option value="xfoil_cst_always">Legacy uzun CST + XFOIL</option></select></div>
               <div class="field full"><label for="seed">Tekrarlanabilirlik tohumu</label><input id="seed" type="number" min="0" step="1" value="42"></div>
               <div id="flow5Settings">
                 <div class="field full"><label for="flow5RunnerPath">flow5 API runner yolu <em>EXE paketinde otomatik</em></label><input id="flow5RunnerPath" type="text" autocomplete="off" placeholder="Kaynak kullanımında: C:\Tools\aeropt-flow5-runner.exe"></div>
                 <div class="field-grid two">
-                  <div class="field"><label for="flow5FoilBudget">Foil başlangıç bütçesi</label><input id="flow5FoilBudget" type="number" min="8" max="4096" step="8" value="48"></div>
-                  <div class="field"><label for="flow5WingBudget">Kanat başlangıç bütçesi</label><input id="flow5WingBudget" type="number" min="8" max="2048" step="8" value="48"></div>
+                  <div class="field"><label for="flow5FoilBudget">Foil başlangıç bütçesi</label><input id="flow5FoilBudget" type="number" min="8" max="4096" step="1" value="48"></div>
+                  <div class="field"><label for="flow5WingBudget">Kanat başlangıç bütçesi</label><input id="flow5WingBudget" type="number" min="8" max="2048" step="1" value="48"></div>
                   <div class="field"><label for="flow5SearchMethod">Kanat arama yöntemi</label><select id="flow5SearchMethod"><option value="LLT">LLT</option><option value="VLM1">VLM1</option><option value="VLM2" selected>VLM2</option><option value="TRIUNIFORM">TRIUNIFORM</option></select></div>
                   <div class="field"><label for="flow5FinalMethod">Son doğrulama</label><select id="flow5FinalMethod"><option value="VLM2">VLM2</option><option value="QUADS">QUADS</option><option value="TRIUNIFORM" selected>TRIUNIFORM</option><option value="TRILINEAR">TRILINEAR</option></select></div>
                   <div class="field"><label for="flow5Finalists">Panel finalisti</label><input id="flow5Finalists" type="number" min="1" max="8" step="1" value="3"></div>
-                  <div class="field"><label for="flow5MinImprovement">E818 min. iyileşme <em>%</em></label><input id="flow5MinImprovement" type="number" min="0" max="20" step="0.25" value="1"></div>
+                  <div class="field"><label for="flow5MinImprovement">E818 min. iyileşme <em>%</em></label><input id="flow5MinImprovement" type="number" min="0" max="20" step="any" value="1"></div>
                   <div class="field"><label for="flow5Threads">flow5 çekirdeği</label><input id="flow5Threads" type="number" min="1" max="64" step="1" value="16"></div>
-                  <div class="field"><label for="flow5SearchStep">Arama α adımı <em>°</em></label><input id="flow5SearchStep" type="number" min="0.25" max="5" step="0.25" value="2"></div>
-                  <div class="field"><label for="flow5FinalStep">Final α adımı <em>°</em></label><input id="flow5FinalStep" type="number" min="0.1" max="2" step="0.1" value="0.5"></div>
-                  <div class="field"><label for="flow5Ncrit">XFoil Ncrit</label><input id="flow5Ncrit" type="number" min="1" max="20" step="0.5" value="9"></div>
-                  <div class="field"><label for="flow5Timeout">Aday zaman aşımı <em>s</em></label><input id="flow5Timeout" type="number" min="30" max="7200" step="30" value="900"></div>
+                  <div class="field"><label for="flow5SearchStep">Arama α adımı <em>°</em></label><input id="flow5SearchStep" type="number" min="0.25" max="5" step="any" value="2"></div>
+                  <div class="field"><label for="flow5FinalStep">Final α adımı <em>°</em></label><input id="flow5FinalStep" type="number" min="0.1" max="2" step="any" value="0.5"></div>
+                  <div class="field"><label for="flow5Ncrit">XFoil Ncrit</label><input id="flow5Ncrit" type="number" min="1" max="20" step="any" value="9"></div>
+                  <div class="field"><label for="flow5Timeout">Aday zaman aşımı <em>s</em></label><input id="flow5Timeout" type="number" min="30" max="7200" step="1" value="900"></div>
                 </div>
                 <div class="field-grid two">
-                  <div class="field"><label for="flow5XtrTop">Üst geçiş x/c</label><input id="flow5XtrTop" type="number" min="0.01" max="1" step="0.05" value="1"></div>
-                  <div class="field"><label for="flow5XtrBottom">Alt geçiş x/c</label><input id="flow5XtrBottom" type="number" min="0.01" max="1" step="0.05" value="1"></div>
+                  <div class="field"><label for="flow5XtrTop">Üst geçiş x/c</label><input id="flow5XtrTop" type="number" min="0.01" max="1" step="any" value="1"></div>
+                  <div class="field"><label for="flow5XtrBottom">Alt geçiş x/c</label><input id="flow5XtrBottom" type="number" min="0.01" max="1" step="any" value="1"></div>
                 </div>
                 <div class="field-grid two">
                   <div class="field"><label for="flow5FoilOptimizer">Foil optimizeri</label><select id="flow5FoilOptimizer"><option value="differential_evolution" selected>Differential Evolution</option><option value="adaptive_elite">Adaptive elite</option></select></div>
                   <div class="field"><label for="flow5WingOptimizer">Kanat optimizeri</label><select id="flow5WingOptimizer"><option value="nsga2" selected>NSGA-II · gerçek çok amaçlı</option><option value="differential_evolution">Differential Evolution</option><option value="adaptive_elite">Adaptive elite</option></select></div>
                   <div class="field"><label for="flow5CoupledIterations">Foil–kanat iterasyonu</label><input id="flow5CoupledIterations" type="number" min="1" max="4" step="1" value="2"></div>
-                  <div class="field"><label for="flow5CouplingClTolerance">Bağlı Cl toleransı <em>%</em></label><input id="flow5CouplingClTolerance" type="number" min="0.1" max="25" step="0.25" value="3"></div>
-                  <div class="field"><label for="flow5CouplingObjectiveTolerance">Bağlı amaç toleransı <em>%</em></label><input id="flow5CouplingObjectiveTolerance" type="number" min="0.05" max="25" step="0.25" value="1"></div>
+                  <div class="field"><label for="flow5CouplingClTolerance">Bağlı Cl toleransı <em>%</em></label><input id="flow5CouplingClTolerance" type="number" min="0.1" max="25" step="any" value="3"></div>
+                  <div class="field"><label for="flow5CouplingObjectiveTolerance">Bağlı amaç toleransı <em>%</em></label><input id="flow5CouplingObjectiveTolerance" type="number" min="0.05" max="25" step="any" value="1"></div>
                 </div>
                 <label class="switch-row"><input id="spanwiseFoilOptimization" type="checkbox"><span></span><b>Kök / orta / uç profillerini ayrı optimize et</b><em>uzun sürer</em></label>
                 <div id="spanwiseFoilFields" class="field-grid two">
-                  <div class="field"><label for="spanwiseFoilBudgetFraction">Kesit bütçe oranı</label><input id="spanwiseFoilBudgetFraction" type="number" min="0.2" max="1" step="0.1" value="0.5"></div>
-                  <div class="field"><label for="spanwiseFoilAcceptance">3 profil kabul payı <em>%</em></label><input id="spanwiseFoilAcceptance" type="number" min="0" max="20" step="0.25" value="2"></div>
+                  <div class="field"><label for="spanwiseFoilBudgetFraction">Kesit bütçe oranı</label><input id="spanwiseFoilBudgetFraction" type="number" min="0.2" max="1" step="any" value="0.5"></div>
+                  <div class="field"><label for="spanwiseFoilAcceptance">3 profil kabul payı <em>%</em></label><input id="spanwiseFoilAcceptance" type="number" min="0" max="20" step="any" value="2"></div>
                 </div>
                 <label class="switch-row"><input id="meshConvergence" type="checkbox" checked><span></span><b>Panel ağı yakınsamasını denetle</b><em>final + ince ağ</em></label>
                 <div id="meshConvergenceFields">
@@ -168,35 +194,35 @@
                     <div class="field"><label for="finalSpanPanels">Final yarı-span paneli</label><input id="finalSpanPanels" type="number" min="4" max="400" step="1" value="22"></div>
                     <div class="field"><label for="convergenceChordPanels">İnce chord paneli</label><input id="convergenceChordPanels" type="number" min="4" max="200" step="1" value="20"></div>
                     <div class="field"><label for="convergenceSpanPanels">İnce yarı-span paneli</label><input id="convergenceSpanPanels" type="number" min="4" max="400" step="1" value="32"></div>
-                    <div class="field"><label for="meshCdTolerance">Mesh CD toleransı <em>%</em></label><input id="meshCdTolerance" type="number" min="0.05" max="25" step="0.1" value="2"></div>
-                    <div class="field"><label for="meshAlphaTolerance">Mesh α toleransı <em>°</em></label><input id="meshAlphaTolerance" type="number" min="0.01" max="5" step="0.01" value="0.25"></div>
+                    <div class="field"><label for="meshCdTolerance">Mesh CD toleransı <em>%</em></label><input id="meshCdTolerance" type="number" min="0.05" max="25" step="any" value="2"></div>
+                    <div class="field"><label for="meshAlphaTolerance">Mesh α toleransı <em>°</em></label><input id="meshAlphaTolerance" type="number" min="0.01" max="5" step="any" value="0.25"></div>
                   </div>
                 </div>
                 <label class="switch-row"><input id="evaluationCache" type="checkbox" checked><span></span><b>Aday önbelleği / devam etme</b><em>iptal sonrası tekrar kullanır</em></label>
                 <label class="switch-row"><input id="optimizerCheckpoint" type="checkbox" checked><span></span><b>Optimizer checkpoint</b><em>popülasyon + RNG durumu</em></label>
                 <label class="switch-row"><input id="budgetEscalation" type="checkbox" checked><span></span><b>Otomatik bütçe yeterlilik denetimi</b><em>48 → 96 → 192</em></label>
                 <div id="budgetEscalationFields" class="field-grid two">
-                  <div class="field"><label for="budgetGrowthFactor">Bütçe büyüme katsayısı</label><input id="budgetGrowthFactor" type="number" min="1.1" max="4" step="0.1" value="2"></div>
-                  <div class="field"><label for="budgetMaxMultiplier">Azami bütçe çarpanı</label><input id="budgetMaxMultiplier" type="number" min="1" max="16" step="0.5" value="4"></div>
-                  <div class="field"><label for="budgetConvergenceTolerance">Yakınsama toleransı <em>%</em></label><input id="budgetConvergenceTolerance" type="number" min="0.01" max="10" step="0.1" value="3"></div>
+                  <div class="field"><label for="budgetGrowthFactor">Bütçe büyüme katsayısı</label><input id="budgetGrowthFactor" type="number" min="1.1" max="4" step="any" value="2"></div>
+                  <div class="field"><label for="budgetMaxMultiplier">Azami bütçe çarpanı</label><input id="budgetMaxMultiplier" type="number" min="1" max="16" step="any" value="4"></div>
+                  <div class="field"><label for="budgetConvergenceTolerance">Yakınsama toleransı <em>%</em></label><input id="budgetConvergenceTolerance" type="number" min="0.01" max="10" step="any" value="3"></div>
                   <div class="field"><label for="budgetStableChecks">Gerekli kararlı kontrol</label><input id="budgetStableChecks" type="number" min="1" max="3" step="1" value="1"></div>
                 </div>
                 <label class="switch-row"><input id="surrogateEnabled" type="checkbox" checked><span></span><b>Surrogate aday ön elemesi</b><em>nihai puan daima flow5</em></label>
                 <div id="surrogateFields" class="field-grid two">
                   <div class="field"><label for="surrogateProposals">Gerçek çözüm başına öneri</label><input id="surrogateProposals" type="number" min="2" max="16" step="1" value="6"></div>
-                  <div class="field"><label for="surrogateMinFraction">Min. gerçek bütçe oranı</label><input id="surrogateMinFraction" type="number" min="0.5" max="1" step="0.05" value="0.65"></div>
-                  <div class="field"><label for="surrogateMaxError">Maks. doğrulama hatası <em>%</em></label><input id="surrogateMaxError" type="number" min="1" max="50" step="0.5" value="8"></div>
-                  <div class="field"><label for="surrogateEarlyStop">Erken durma iyileşmesi <em>%</em></label><input id="surrogateEarlyStop" type="number" min="0" max="10" step="0.05" value="0.25"></div>
+                  <div class="field"><label for="surrogateMinFraction">Min. gerçek bütçe oranı</label><input id="surrogateMinFraction" type="number" min="0.5" max="1" step="any" value="0.65"></div>
+                  <div class="field"><label for="surrogateMaxError">Maks. doğrulama hatası <em>%</em></label><input id="surrogateMaxError" type="number" min="1" max="50" step="any" value="8"></div>
+                  <div class="field"><label for="surrogateEarlyStop">Erken durma iyileşmesi <em>%</em></label><input id="surrogateEarlyStop" type="number" min="0" max="10" step="any" value="0.25"></div>
                 </div>
                 <div class="field-grid two">
                   <div class="field"><label for="multiSeedRuns">Bağımsız seed koşusu</label><select id="multiSeedRuns"><option value="1" selected>1 · kapalı</option><option value="3">3 · önerilen kontrol</option><option value="5">5 · güçlü kontrol</option></select></div>
-                  <div class="field"><label for="multiSeedObjectiveCv">Amaç CV toleransı <em>%</em></label><input id="multiSeedObjectiveCv" type="number" min="0.1" max="50" step="0.25" value="3"></div>
-                  <div class="field"><label for="multiSeedGeometryCv">Geometri CV toleransı <em>%</em></label><input id="multiSeedGeometryCv" type="number" min="0.1" max="50" step="0.25" value="2"></div>
+                  <div class="field"><label for="multiSeedObjectiveCv">Amaç CV toleransı <em>%</em></label><input id="multiSeedObjectiveCv" type="number" min="0.1" max="50" step="any" value="3"></div>
+                  <div class="field"><label for="multiSeedGeometryCv">Geometri CV toleransı <em>%</em></label><input id="multiSeedGeometryCv" type="number" min="0.1" max="50" step="any" value="2"></div>
                 </div>
                 <label class="switch-row"><input id="validationEnabled" type="checkbox" checked><span></span><b>Otomatik doğrulama sözleşmesi</b><em>kuvvet, mesh, solver, polar</em></label>
                 <div id="validationFields" class="field-grid two">
-                  <div class="field"><label for="validationForceTolerance">Kuvvet kapanışı <em>%</em></label><input id="validationForceTolerance" type="number" min="0.01" max="25" step="0.1" value="1"></div>
-                  <div class="field"><label for="validationDragTolerance">CD bileşen kapanışı <em>%</em></label><input id="validationDragTolerance" type="number" min="0.1" max="100" step="0.5" value="12"></div>
+                  <div class="field"><label for="validationForceTolerance">Kuvvet kapanışı <em>%</em></label><input id="validationForceTolerance" type="number" min="0.01" max="25" step="any" value="1"></div>
+                  <div class="field"><label for="validationDragTolerance">CD bileşen kapanışı <em>%</em></label><input id="validationDragTolerance" type="number" min="0.1" max="100" step="any" value="12"></div>
                 </div>
                 <p class="solver-help">E818 baseline olarak çözülür; CST eğrileri Differential Evolution ile aranır. Surrogate yalnız hangi adayın gerçek flow5 çözümüne gideceğini seçer. Checkpoint nesil sınırlarında optimizer popülasyonunu saklar. Multi-seed seçilirse bağımsız koşular karşılaştırılır; toplam süre koşu sayısıyla yaklaşık doğrusal artar.</p>
               </div>
@@ -207,12 +233,12 @@
                 </div>
                 <div class="field full"><label for="xfoilPath">Harici XFOIL yolu</label><input id="xfoilPath" type="text" autocomplete="off" placeholder="C:\xfoil\xfoil.exe veya /usr/bin/xfoil"></div>
                 <div class="field-grid two">
-                  <div class="field"><label for="clTolerance">C<sub>L</sub> fark sınırı <em>%</em></label><input id="clTolerance" type="number" min="0.1" max="100" step="0.5" value="5"></div>
-                  <div class="field"><label for="cdTolerance">C<sub>D</sub> fark sınırı <em>%</em></label><input id="cdTolerance" type="number" min="0.1" max="200" step="1" value="15"></div>
-                  <div class="field"><label for="candidateBudget">CST aday bütçesi</label><input id="candidateBudget" type="number" min="16" max="4096" step="16" value="128"></div>
+                  <div class="field"><label for="clTolerance">C<sub>L</sub> fark sınırı <em>%</em></label><input id="clTolerance" type="number" min="0.1" max="100" step="any" value="5"></div>
+                  <div class="field"><label for="cdTolerance">C<sub>D</sub> fark sınırı <em>%</em></label><input id="cdTolerance" type="number" min="0.1" max="200" step="any" value="15"></div>
+                  <div class="field"><label for="candidateBudget">CST aday bütçesi</label><input id="candidateBudget" type="number" min="16" max="4096" step="1" value="128"></div>
                   <div class="field"><label for="parallelWorkers">Paralel işçi</label><input id="parallelWorkers" type="number" min="1" max="64" step="1" value="16"></div>
                 </div>
-                <div class="field full"><label for="xfoilTimeout">XFOIL zaman aşımı <em>s</em></label><input id="xfoilTimeout" type="number" min="5" max="300" step="5" value="45"></div>
+                <div class="field full"><label for="xfoilTimeout">XFOIL zaman aşımı <em>s</em></label><input id="xfoilTimeout" type="number" min="5" max="300" step="1" value="45"></div>
               </div>
             </div>
           </details>
@@ -223,18 +249,18 @@
               <label class="switch-row primary-switch"><input id="structureEnabled" type="checkbox"><span></span><b>Yapısal denetimi etkinleştir</b><em>varsayılan kapalı</em></label>
               <div id="structureFields">
                 <div class="field-grid two">
-                  <div class="field"><label for="youngsModulus">Young modülü <em>GPa</em></label><input id="youngsModulus" type="number" min="0.01" max="1000" step="1" value="70"></div>
-                  <div class="field"><label for="materialDensity">Malzeme yoğunluğu <em>kg/m³</em></label><input id="materialDensity" type="number" min="1" max="30000" step="10" value="1600"></div>
-                  <div class="field"><label for="allowableStress">İzinli gerilme <em>MPa</em></label><input id="allowableStress" type="number" min="0.01" max="10000" step="10" value="300"></div>
-                  <div class="field"><label for="structuralSafetyFactor">Emniyet katsayısı</label><input id="structuralSafetyFactor" type="number" min="1" max="10" step="0.1" value="1.5"></div>
-                  <div class="field"><label for="sparHeightFraction">Spar yüksekliği / foil t</label><input id="sparHeightFraction" type="number" min="0.1" max="1" step="0.05" value="0.75"></div>
-                  <div class="field"><label for="sparCapWidth">Spar cap eni / chord</label><input id="sparCapWidth" type="number" min="0.005" max="0.5" step="0.005" value="0.08"></div>
-                  <div class="field"><label for="sparCapThickness">Spar cap kalınlığı <em>mm</em></label><input id="sparCapThickness" type="number" min="0.05" max="100" step="0.1" value="2"></div>
-                  <div class="field"><label for="skinThickness">Skin kalınlığı <em>mm</em></label><input id="skinThickness" type="number" min="0.05" max="100" step="0.1" value="1"></div>
-                  <div class="field"><label for="torsionBoxWidth">Torsion box eni / chord</label><input id="torsionBoxWidth" type="number" min="0.05" max="0.9" step="0.05" value="0.45"></div>
-                  <div class="field"><label for="poissonRatio">Poisson oranı</label><input id="poissonRatio" type="number" min="0" max="0.49" step="0.01" value="0.3"></div>
-                  <div class="field"><label for="maxTipDeflection">Maks. uç sehmi <em>% yarı-span</em></label><input id="maxTipDeflection" type="number" min="0.01" max="100" step="0.5" value="8"></div>
-                  <div class="field"><label for="maxElasticTwist">Maks. elastik twist <em>°</em></label><input id="maxElasticTwist" type="number" min="0.01" max="45" step="0.1" value="2"></div>
+                  <div class="field"><label for="youngsModulus">Young modülü <em>GPa</em></label><input id="youngsModulus" type="number" min="0.01" max="1000" step="any" value="70"></div>
+                  <div class="field"><label for="materialDensity">Malzeme yoğunluğu <em>kg/m³</em></label><input id="materialDensity" type="number" min="1" max="30000" step="any" value="1600"></div>
+                  <div class="field"><label for="allowableStress">İzinli gerilme <em>MPa</em></label><input id="allowableStress" type="number" min="0.01" max="10000" step="any" value="300"></div>
+                  <div class="field"><label for="structuralSafetyFactor">Emniyet katsayısı</label><input id="structuralSafetyFactor" type="number" min="1" max="10" step="any" value="1.5"></div>
+                  <div class="field"><label for="sparHeightFraction">Spar yüksekliği / foil t</label><input id="sparHeightFraction" type="number" min="0.1" max="1" step="any" value="0.75"></div>
+                  <div class="field"><label for="sparCapWidth">Spar cap eni / chord</label><input id="sparCapWidth" type="number" min="0.005" max="0.5" step="any" value="0.08"></div>
+                  <div class="field"><label for="sparCapThickness">Spar cap kalınlığı <em>mm</em></label><input id="sparCapThickness" type="number" min="0.05" max="100" step="any" value="2"></div>
+                  <div class="field"><label for="skinThickness">Skin kalınlığı <em>mm</em></label><input id="skinThickness" type="number" min="0.05" max="100" step="any" value="1"></div>
+                  <div class="field"><label for="torsionBoxWidth">Torsion box eni / chord</label><input id="torsionBoxWidth" type="number" min="0.05" max="0.9" step="any" value="0.45"></div>
+                  <div class="field"><label for="poissonRatio">Poisson oranı</label><input id="poissonRatio" type="number" min="0" max="0.49" step="any" value="0.3"></div>
+                  <div class="field"><label for="maxTipDeflection">Maks. uç sehmi <em>% yarı-span</em></label><input id="maxTipDeflection" type="number" min="0.01" max="100" step="any" value="8"></div>
+                  <div class="field"><label for="maxElasticTwist">Maks. elastik twist <em>°</em></label><input id="maxElasticTwist" type="number" min="0.01" max="45" step="any" value="2"></div>
                 </div>
                 <p class="solver-help">Euler–Bernoulli kiriş + ince cidarlı kapalı torsion box ön taramasıdır. Açıkken aday puanına gerilme, sehim ve burulma ihlalleri eklenir; kapalıyken bu hesapların hiçbiri çalışmaz.</p>
               </div>
@@ -247,11 +273,11 @@
               <label class="switch-row primary-switch"><input id="hydroEnabled" type="checkbox" checked><span></span><b>Su akışında kavitasyonu denetle</b><em>havada uygulanmaz</em></label>
               <div id="hydroFields">
                 <div class="field-grid two">
-                  <div class="field"><label for="submergenceDepth">Batma derinliği <em>m</em></label><input id="submergenceDepth" type="number" min="0.001" step="0.05" value="1"></div>
-                  <div class="field"><label for="ambientPressure">Ortam basıncı <em>Pa</em></label><input id="ambientPressure" type="number" min="100" step="100" value="101325"></div>
-                  <div class="field"><label for="vaporPressure">Buhar basıncı <em>Pa</em></label><input id="vaporPressure" type="number" min="0" step="10" value="1705"></div>
-                  <div class="field"><label for="cavitationSafetyFactor">Kavitasyon emniyeti</label><input id="cavitationSafetyFactor" type="number" min="1" max="10" step="0.05" value="1.2"></div>
-                  <div class="field"><label for="minimumSubmergenceChords">Min. batma / MAC</label><input id="minimumSubmergenceChords" type="number" min="0.1" max="100" step="0.25" value="2"></div>
+                  <div class="field"><label for="submergenceDepth">Batma derinliği <em>m</em></label><input id="submergenceDepth" type="number" min="0.001" step="any" value="1"></div>
+                  <div class="field"><label for="ambientPressure">Ortam basıncı <em>Pa</em></label><input id="ambientPressure" type="number" min="100" step="any" value="101325"></div>
+                  <div class="field"><label for="vaporPressure">Buhar basıncı <em>Pa</em></label><input id="vaporPressure" type="number" min="0" step="any" value="1705"></div>
+                  <div class="field"><label for="cavitationSafetyFactor">Kavitasyon emniyeti</label><input id="cavitationSafetyFactor" type="number" min="1" max="10" step="any" value="1.2"></div>
+                  <div class="field"><label for="minimumSubmergenceChords">Min. batma / MAC</label><input id="minimumSubmergenceChords" type="number" min="0.1" max="100" step="any" value="2"></div>
                 </div>
                 <label class="switch-row"><input id="freeSurfaceScreen" type="checkbox" checked><span></span><b>Serbest yüzey risk bayrağı</b><em>Froude + h/MAC</em></label>
               </div>
@@ -301,14 +327,14 @@
           </div>
           <div id="metricGrid" class="metric-grid"></div>
 
-          <div class="visual-grid">
+          <div id="visualGrid" class="visual-grid">
             <article class="panel foil-panel"><header><div><span class="panel-kicker">PROFİL</span><h3>Optimize airfoil</h3></div><span id="foilTag" class="mono-tag"></span></header><div id="foilChart" class="foil-chart"></div><div id="foilStats" class="mini-stats"></div></article>
-            <article class="panel planform-panel"><header><div><span class="panel-kicker">3B GEOMETRİ</span><h3>Optimize kanat yüzeyi</h3></div><span class="mono-tag">OBJ PREVIEW</span></header><div id="planformChart" class="planform-chart"></div><div id="planformStats" class="mini-stats"></div></article>
+            <article id="planformPanel" class="panel planform-panel"><header><div><span class="panel-kicker">3B GEOMETRİ</span><h3>Optimize kanat yüzeyi</h3></div><span class="mono-tag">OBJ PREVIEW</span></header><div id="planformChart" class="planform-chart"></div><div id="planformStats" class="mini-stats"></div></article>
           </div>
 
-          <div class="chart-grid">
+          <div id="chartGrid" class="chart-grid">
             <article class="panel"><header><div><span class="panel-kicker">2B POLAR</span><h3>C<sub>L</sub> — α</h3></div><span id="reTag" class="mono-tag"></span></header><div id="polarChart" class="line-chart"></div></article>
-            <article class="panel"><header><div><span class="panel-kicker">SPANWISE</span><h3>Yük dağılımı</h3></div><span class="mono-tag">YARIM KANAT</span></header><div id="loadChart" class="line-chart"></div></article>
+            <article id="loadPanel" class="panel"><header><div><span class="panel-kicker">SPANWISE</span><h3>Yük dağılımı</h3></div><span class="mono-tag">YARIM KANAT</span></header><div id="loadChart" class="line-chart"></div></article>
           </div>
 
           <article id="xfoilPanel" class="panel validation-panel hidden"><header><div><span class="panel-kicker">ÇÖZÜCÜ KAYNAĞI</span><h3 id="solverSummaryTitle">flow5 analiz zinciri</h3></div><span id="xfoilStatusTag" class="mono-tag"></span></header><div id="xfoilSummary"></div></article>
@@ -326,7 +352,7 @@
 
           <article id="budgetPanel" class="panel validation-panel hidden"><header><div><span class="panel-kicker">BÜTÇE YAKINSAMASI</span><h3>Değerlendirme bütçesi yeterli mi?</h3></div><span id="budgetStatusTag" class="mono-tag"></span></header><div id="budgetSummary"></div></article>
 
-          <article class="panel comparison-panel"><header><div><span class="panel-kicker">KARŞILAŞTIRMA</span><h3>Optimum vs. eş alanlı dikdörtgen</h3></div><span id="savingTag" class="saving-tag"></span></header><div id="comparisonTable"></div></article>
+          <article id="comparisonPanel" class="panel comparison-panel"><header><div><span class="panel-kicker">KARŞILAŞTIRMA</span><h3>Optimum vs. eş alanlı dikdörtgen</h3></div><span id="savingTag" class="saving-tag"></span></header><div id="comparisonTable"></div></article>
 
           <article id="historyPanel" class="panel history-panel"><header><div><span class="panel-kicker">PROJE GEÇMİŞİ</span><h3>Tasarımları yan yana karşılaştır</h3></div><button id="clearHistory" class="inline-button" type="button">Geçmişi temizle</button></header><div class="history-controls"><label>Tasarım A<select id="historyA"></select></label><label>Tasarım B<select id="historyB"></select></label></div><div id="historyComparison" class="history-comparison"></div></article>
 
