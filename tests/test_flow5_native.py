@@ -180,6 +180,7 @@ class Flow5NativePipelineTests(unittest.TestCase):
 
     def test_speed_mesh_contains_bounds_and_exact_reference(self):
         self.assertEqual(_sample_speeds((13.0, 22.0), 18.0, 4), [13.0, 16.0, 18.0, 22.0])
+        self.assertEqual(_sample_speeds((12.5, 12.5), 12.5, 5), [12.5])
 
     def test_windows_flow5_children_are_started_without_a_console_window(self):
         class DummyStartupInfo:
