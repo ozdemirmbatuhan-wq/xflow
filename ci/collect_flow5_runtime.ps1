@@ -35,10 +35,64 @@ function Is-WindowsSystemDll([string]$Name) {
 
 function Is-WinDeployQtDependency([string]$Name) {
     $lower = $Name.ToLowerInvariant()
-    return (
-        $lower -match '^qt6.*\.dll$' -or
-        $lower -match '^(msvcp|vcruntime|concrt|vcomp)\d+(?:_[a-z0-9]+)*\.dll$'
+    return ($lower -match '^qt6.*\.dll$')
+}
+
+# windeployqt can deploy vc_redist.x64.exe instead of the individual MSVC
+# runtime DLLs. AeroOpt is distributed as a portable ZIP, so collect the
+# redistributable x64 DLLs from the active MSVC toolchain and place only the
+# runtime files that the dependency graph actually needs beside the runner.
+$msvcRedistCandidates = @()
+if (-not [string]::IsNullOrWhiteSpace($env:VCToolsRedistDir)) {
+    $msvcRedistCandidates += (Join-Path $env:VCToolsRedistDir "x64")
+}
+
+$msvcRedistBases = @()
+if (-not [string]::IsNullOrWhiteSpace($env:VCINSTALLDIR)) {
+    $msvcRedistBases += (Join-Path $env:VCINSTALLDIR "Redist\MSVC")
+}
+
+$programFilesX86 = [Environment]::GetFolderPath("ProgramFilesX86")
+$vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path $vswhere) {
+    $visualStudioRoot = (& $vswhere -latest -products * `
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -property installationPath | Select-Object -First 1)
+    if (-not [string]::IsNullOrWhiteSpace($visualStudioRoot)) {
+        $msvcRedistBases += (Join-Path $visualStudioRoot "VC\Redist\MSVC")
+    }
+}
+
+foreach ($base in ($msvcRedistBases | Select-Object -Unique)) {
+    if (-not (Test-Path $base)) { continue }
+    $crtFiles = @(
+        Get-ChildItem -Path $base -Recurse -File -Filter "msvcp140.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '(?i)[\\/]x64[\\/]Microsoft\.VC\d+\.CRT[\\/]' } |
+            Sort-Object -Property FullName -Descending
     )
+    foreach ($crtFile in $crtFiles) {
+        $msvcRedistCandidates += $crtFile.Directory.Parent.FullName
+    }
+}
+
+$msvcRedistRoots = @(
+    $msvcRedistCandidates |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path $_) } |
+        ForEach-Object { (Resolve-Path $_).Path } |
+        Select-Object -Unique
+)
+if ($msvcRedistRoots.Count -eq 0) {
+    throw "The x64 Visual C++ redistributable DLL directory could not be found"
+}
+
+$msvcp140 = Get-ChildItem -Path $msvcRedistRoots -Recurse -File `
+    -Filter "msvcp140.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $msvcp140) {
+    throw "MSVCP140.dll was not found below the x64 Visual C++ redistributable directory"
+}
+$msvcpHeaders = (& $dumpbin /nologo /headers $msvcp140.FullName 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $msvcpHeaders -notmatch '(?i)8664 machine \(x64\)') {
+    throw "The located MSVCP140.dll is not a valid x64 runtime DLL: $($msvcp140.FullName)"
 }
 
 $searchRoots = @(
@@ -49,6 +103,8 @@ $searchRoots = @(
     (Join-Path $GmshRoot "lib"),
     (Join-Path $OpenBlasRoot "bin"),
     $ThirdPartyRoot
+) + @(
+    $msvcRedistRoots
 )
 
 # Index release candidates once. A debug path receives lower priority when
@@ -106,7 +162,7 @@ while ($queue.Count -gt 0) {
 }
 
 $windeployqt = (Get-Command windeployqt).Source
-& $windeployqt --release --no-translations --compiler-runtime --dir $Destination `
+& $windeployqt --release --no-translations --no-compiler-runtime --dir $Destination `
     $runnerDestination
 if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
 
@@ -134,7 +190,9 @@ $required = @(
     "flow5-lib.dll",
     "flow5-io-lib.dll",
     "libopenblas.dll",
-    "TKernel.dll"
+    "TKernel.dll",
+    "MSVCP140.dll",
+    "VCRUNTIME140.dll"
 )
 foreach ($name in $required) {
     if (-not (Test-Path (Join-Path $Destination $name))) {
