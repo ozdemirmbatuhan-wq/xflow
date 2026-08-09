@@ -5,10 +5,13 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from aeropt.pipeline import InputError, run_design
+from aeropt.flow5 import _hidden_subprocess_kwargs
 from aeropt.flow5_pipeline import _sample_speeds
 
 
@@ -145,6 +148,83 @@ class Flow5NativePipelineTests(unittest.TestCase):
 
     def test_speed_mesh_contains_bounds_and_exact_reference(self):
         self.assertEqual(_sample_speeds((13.0, 22.0), 18.0, 4), [13.0, 16.0, 18.0, 22.0])
+
+    def test_windows_flow5_children_are_started_without_a_console_window(self):
+        class DummyStartupInfo:
+            def __init__(self):
+                self.dwFlags = 0
+                self.wShowWindow = -1
+
+        with (
+            patch("aeropt.flow5.os.name", "nt"),
+            patch.object(subprocess, "STARTUPINFO", DummyStartupInfo, create=True),
+            patch.object(subprocess, "STARTF_USESHOWWINDOW", 1, create=True),
+            patch.object(subprocess, "SW_HIDE", 0, create=True),
+            patch.object(subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
+        ):
+            options = _hidden_subprocess_kwargs()
+
+        self.assertEqual(options["creationflags"], 0x08000000)
+        self.assertEqual(options["startupinfo"].dwFlags & 1, 1)
+        self.assertEqual(options["startupinfo"].wShowWindow, 0)
+
+    def test_foil_only_result_can_feed_a_fixed_foil_wing_optimization(self):
+        common = {
+            "flow": {
+                "speed_m_s": 18.0,
+                "speed_min_m_s": 14.0,
+                "speed_max_m_s": 22.0,
+                "speed_samples": 3,
+                "target_lift_n": 40.0,
+            },
+            "solver": {
+                "airfoil_strategy": "flow5_native",
+                "flow5_runner_path": str(FAKE_RUNNER),
+                "flow5_threads": 16,
+                "flow5_foil_candidate_budget": 8,
+                "flow5_wing_candidate_budget": 8,
+                "flow5_finalists": 1,
+                "flow5_alpha_step_search_deg": 2.0,
+                "flow5_alpha_step_final_deg": 1.0,
+                "flow5_budget_escalation_enabled": False,
+                "flow5_surrogate_enabled": False,
+                "flow5_mesh_convergence_enabled": False,
+                "seed": 19,
+            },
+        }
+        old_value = os.environ.get("AEROPT_ALLOW_TEST_DOUBLE")
+        os.environ["AEROPT_ALLOW_TEST_DOUBLE"] = "1"
+        try:
+            foil_result = run_design({**common, "workflow": {"mode": "foil_only"}})
+            self.assertEqual(foil_result["workflow_mode"], "foil_only")
+            self.assertNotIn("wing", foil_result)
+            self.assertIn("airfoil_dat", foil_result["exports"])
+            self.assertEqual(foil_result["solver_run"]["wing_optimizer"], "skipped")
+
+            wing_request = {
+                **common,
+                "workflow": {"mode": "wing_only"},
+                "airfoil": {
+                    "baseline_profile": "custom_dat",
+                    "baseline_dat": foil_result["exports"]["airfoil_dat"],
+                },
+            }
+            wing_result = run_design(wing_request)
+        finally:
+            if old_value is None:
+                os.environ.pop("AEROPT_ALLOW_TEST_DOUBLE", None)
+            else:
+                os.environ["AEROPT_ALLOW_TEST_DOUBLE"] = old_value
+
+        self.assertEqual(wing_result["workflow_mode"], "wing_only")
+        self.assertIn("wing", wing_result)
+        self.assertEqual(
+            wing_result["airfoil_optimization"]["optimizer"],
+            "skipped_fixed_airfoil",
+        )
+        self.assertEqual(wing_result["airfoil_optimization"]["candidates_evaluated"], 1)
+        self.assertEqual(wing_result["solver_run"]["foil_optimizer"], "skipped_fixed_airfoil")
+        self.assertFalse(wing_result["coupled_design"]["enabled"])
 
 
 if __name__ == "__main__":
