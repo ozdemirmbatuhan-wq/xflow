@@ -248,3 +248,61 @@ jobs:
           path: artifacts/AeroOpt-0.8.0-Windows-flow5.zip
           if-no-files-found: error
           compression-level: 0
+
+  verify-windows-artifact:
+    needs: build-windows
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out UI smoke test
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Download uploaded Windows application
+        uses: actions/download-artifact@v5
+        with:
+          name: AeroOpt-0.8.0-Windows-flow5
+          path: downloaded-artifact
+
+      - name: Extract downloaded application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Expand-Archive `
+            "$PWD\downloaded-artifact\AeroOpt-0.8.0-Windows-flow5.zip" `
+            "$PWD\downloaded-app" `
+            -Force
+          if (-not (Test-Path "$PWD\downloaded-app\AeroOpt.exe")) {
+            throw "Downloaded artifact does not contain AeroOpt.exe"
+          }
+
+      - name: Exercise downloaded EXE user interface
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install "playwright==1.55.0"
+          $process = Start-Process `
+            "$PWD\downloaded-app\AeroOpt.exe" `
+            -ArgumentList "--no-browser", "--port", "8766" `
+            -PassThru
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              Start-Sleep -Seconds 1
+              try {
+                $health = Invoke-RestMethod "http://127.0.0.1:8766/api/health"
+                if ($health.ok) { $ready = $true; break }
+              } catch { }
+            }
+            if (-not $ready) { throw "Downloaded AeroOpt.exe did not become healthy" }
+            python ci/smoke_packaged_ui.py "http://127.0.0.1:8766"
+            if ($LASTEXITCODE -ne 0) { throw "Downloaded AeroOpt UI smoke test failed" }
+          } finally {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+          }
+
