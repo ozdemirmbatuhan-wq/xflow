@@ -302,6 +302,8 @@ jobs:
             if (-not $ready) { throw "Downloaded AeroOpt.exe did not become healthy" }
             python ci/smoke_packaged_ui.py "http://127.0.0.1:8766"
             if ($LASTEXITCODE -ne 0) { throw "Downloaded AeroOpt UI smoke test failed" }
+            python ci/run_packaged_design_acceptance.py "http://127.0.0.1:8766"
+            if ($LASTEXITCODE -ne 0) { throw "Downloaded AeroOpt 140 kN acceptance test failed" }
           } finally {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
           }
