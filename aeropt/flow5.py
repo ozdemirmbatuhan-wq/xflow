@@ -22,6 +22,19 @@ from .models import AirfoilLike, Fluid, WingGeometry
 PROTOCOL = "aeropt-flow5-v1"
 
 
+def _hidden_subprocess_kwargs() -> dict[str, Any]:
+    """Keep console-mode solver children invisible in the Windows GUI build."""
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+        "startupinfo": startupinfo,
+    }
+
+
 class Flow5RunnerError(RuntimeError):
     """Raised when the external flow5 API runner fails or violates the protocol."""
 
@@ -308,6 +321,7 @@ class Flow5Runner:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    **_hidden_subprocess_kwargs(),
                 )
             except OSError as exc:
                 raise Flow5RunnerError(f"flow5 runner başlatılamadı: {exc}") from exc
