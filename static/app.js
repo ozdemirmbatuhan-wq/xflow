@@ -8,6 +8,21 @@ const presets = {
 
 let lastResult = null;
 let activeJobId = null;
+const SAVED_AIRFOIL_KEY = "aeropt.savedAirfoil.v1";
+
+function readSavedAirfoil() {
+  try {
+    const value = JSON.parse(localStorage.getItem(SAVED_AIRFOIL_KEY) || "null");
+    return value && typeof value.dat === "string" && value.dat.trim() ? value : null;
+  } catch { return null; }
+}
+
+async function readDatFile(inputId, missingMessage) {
+  const file = $(inputId).files?.[0];
+  if (!file) throw new Error(missingMessage);
+  if (file.size > 500000) throw new Error("DAT dosyası 500 kB sınırını aşıyor.");
+  return file.text();
+}
 
 function numberValue(id) {
   const input = $(id);
@@ -33,15 +48,23 @@ function numberValue(id) {
 
 async function collectRequest() {
   const optionalCl = $("designCl").value.trim();
-  const baselineProfile = $("baselineAirfoil").value;
+  const workflowMode = $("optimizationMode").value;
+  let baselineProfile = $("baselineAirfoil").value;
   let baselineDat = "";
-  if (baselineProfile === "custom_dat") {
-    const file = $("baselineDatFile").files?.[0];
-    if (!file) throw new Error("Özel başlangıç profili için bir DAT dosyası seçin.");
-    if (file.size > 500000) throw new Error("DAT dosyası 500 kB sınırını aşıyor.");
-    baselineDat = await file.text();
+  if (workflowMode === "wing_only") {
+    if ($("wingAirfoilSource").value === "saved") {
+      const saved = readSavedAirfoil();
+      if (!saved) throw new Error("Önce yalnız profil optimizasyonu çalıştırın veya bir DAT dosyası seçin.");
+      baselineDat = saved.dat;
+    } else {
+      baselineDat = await readDatFile("wingAirfoilDatFile", "Kanat optimizasyonu için bir DAT dosyası seçin.");
+    }
+    baselineProfile = "custom_dat";
+  } else if (baselineProfile === "custom_dat") {
+    baselineDat = await readDatFile("baselineDatFile", "Özel başlangıç profili için bir DAT dosyası seçin.");
   }
   return {
+    workflow: { mode: workflowMode },
     flow: {
       fluid: $("fluid").value,
       density_kg_m3: numberValue("density"),
@@ -177,6 +200,7 @@ async function collectRequest() {
 
 function applyDefaults(data) {
   const map = {
+    optimizationMode: data.workflow?.mode || "coupled",
     fluid: data.flow.fluid, density: data.flow.density_kg_m3,
     viscosity: data.flow.dynamic_viscosity_pa_s, soundSpeed: data.flow.speed_of_sound_m_s,
     speed: data.flow.speed_m_s, speedMin: data.flow.speed_min_m_s,
@@ -282,6 +306,7 @@ function applyDefaults(data) {
   toggleSolverSettings();
   toggleBaselineInput();
   toggleOptionalPanels();
+  toggleWorkflowMode();
 }
 
 function showState(name) {
@@ -685,7 +710,92 @@ function renderHistory() {
   $("historyComparison").innerHTML = `<div class="table-scroll"><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Tasarım A</th><th>Tasarım B</th><th>A − B</th></tr></thead><tbody>${row("L/D",a.wing.ld,b.wing.ld,1)}${row("Sürükleme",a.wing.drag_n,b.wing.drag_n,2,"N")}${row("Taşıma",a.wing.lift_n,b.wing.lift_n,1,"N")}${row("Açıklık",a.geometry.span,b.geometry.span,3,"m")}${row("Alan",a.geometry.area,b.geometry.area,3,"m²")}${row("Açıklık oranı",a.geometry.aspect_ratio,b.geometry.aspect_ratio,2)}${row("Taper",a.geometry.taper,b.geometry.taper,3)}${row("Sweep",a.geometry.sweep_deg,b.geometry.sweep_deg,2,"°")}${row("Uç twist",a.geometry.tip_twist_deg,b.geometry.tip_twist_deg,2,"°")}${row("Kök momenti",a.wing.root_bending_moment_nm,b.wing.root_bending_moment_nm,1,"N·m")}</tbody></table></div>`;
 }
 
+function rememberAirfoilResult(result) {
+  const dat = result.exports?.airfoil_dat;
+  if (!dat) return;
+  try {
+    localStorage.setItem(SAVED_AIRFOIL_KEY, JSON.stringify({
+      name: result.airfoil.name,
+      family: result.airfoil.family,
+      dat,
+      created_at: new Date().toISOString(),
+    }));
+  } catch { /* private mode */ }
+  updateSavedAirfoilStatus();
+}
+
+function setWingResultVisibility(visible) {
+  ["planformPanel", "loadPanel", "engineeringPanel", "validationPanel", "diagnosticPanel", "paretoPanel", "stabilityPanel", "comparisonPanel", "historyPanel"]
+    .forEach((id) => $(id).classList.toggle("hidden", !visible));
+  $("visualGrid").classList.toggle("single-column", !visible);
+  $("chartGrid").classList.toggle("single-column", !visible);
+}
+
+function configureExportPanel(foilOnly) {
+  const panel = document.querySelector(".export-panel");
+  panel.querySelector("h3").textContent = foilOnly ? "Optimize profil dosyaları" : "Çözümlenmiş flow5 paketi";
+  panel.querySelector("p").textContent = foilOnly
+    ? "DAT, flow5/XFoil poları ve yeniden kullanılabilir proje girdisi dışa aktarılır."
+    : "ZIP; DAT, plane/analysis XML, OBJ, polarlar, sonuçlar ve gerçek çözümlenmiş .fl5 projesini birlikte taşır.";
+  panel.querySelector("ol").innerHTML = foilOnly
+    ? "<li><b>Airfoil · DAT</b> dosyasını indirin veya doğrudan Yalnız kanat modunu seçin</li><li>Son optimize profil bu tarayıcıda otomatik saklanır</li><li>Kanat aşamasında profil değişmeden flow5/XFoil ile yeniden doğrulanır</li>"
+    : "<li><b>aeropt-optimized.fl5</b> dosyasını flow5 7.57'de açın</li><li>Foil ve 3B polarları Data ağacında inceleyin</li><li>DAT/XML/OBJ dosyalarını bağımsız geometri aktarımı için kullanın</li>";
+}
+
+function renderFoilOnlyResult(result) {
+  lastResult = result;
+  setWingResultVisibility(false);
+  configureExportPanel(true);
+  const foil = result.airfoil;
+  const meta = result.airfoil_optimization;
+  const cruise = meta.final_cruise_point || {};
+  const baseline = meta.baseline || {};
+  const selection = meta.selection || {};
+  $("resultTitle").textContent = foil.name;
+  $("resultSubtitle").textContent = `${result.flow.name} · ${fmt(result.flow.speed_min_m_s,1)}–${fmt(result.flow.speed_max_m_s,1)} m/s · yalnız profil`;
+  $("feasibilityBadge").textContent = result.status === "feasible" ? "Profil hazır" : "Kontrol gerekli";
+  $("feasibilityBadge").classList.toggle("review", result.status !== "feasible");
+  $("metricGrid").innerHTML = [
+    metric("Hedef CL",fmt(meta.target_cl,4),""), metric("Referans CL",fmt(cruise.cl,4),""),
+    metric("Referans CD",fmt(cruise.cd,5),""), metric("2B L / D",fmt(cruise.ld,1),""),
+    metric("Reynolds",sci(meta.reynolds),""),
+  ].join("");
+  $("foilTag").textContent = `${foil.family} · 100 nokta`;
+  $("reTag").textContent = `${result.polar_source} · M ${fmt(result.flow.mach,3)}`;
+  renderFoil(result);
+  svgLineChart($("polarChart"), result.polar, "alpha_deg", "cl", { referenceX: cruise.alpha_deg, label: "Taşıma katsayısı polar grafiği" });
+  const row = (label, value, unit="") => `<tr><td>${escapeHtml(label)}</td><td class="best">${escapeHtml(value)} ${escapeHtml(unit)}</td></tr>`;
+  $("xfoilPanel").classList.remove("hidden");
+  $("solverSummaryTitle").textContent = "flow5-native profil çözüm zinciri";
+  $("xfoilStatusTag").textContent = "flow5 XFoilTask · KANAT ATLANDI";
+  $("xfoilSummary").innerHTML = `<table class="comparison-table validation-table"><tbody>${[
+    row("Başlangıç profili", baseline.display_name || "Eppler E818"),
+    row("Profil seçimi", selection.selected_baseline ? "Baseline korundu" : `${selection.selected_family || foil.family} optimize profil`),
+    row("Baseline iyileşmesi", selection.selected_improvement_vs_baseline_percent == null ? "—" : fmt(selection.selected_improvement_vs_baseline_percent,2), "%"),
+    row("Foil optimizeri", result.solver_run.foil_optimizer),
+    row("Gerçek foil adayı", String(meta.candidates_evaluated)),
+    row("Akış noktası", String(result.flow.speed_samples)),
+    row("Referans α", fmt(cruise.alpha_deg,2), "°"),
+    row("Referans CL", fmt(cruise.cl,4)),
+    row("Referans CD", fmt(cruise.cd,5)),
+  ].join("")}</tbody></table>`;
+  renderBudgetConvergence(result);
+  $("insights").innerHTML = (result.insights || []).map((item) => `<div class="insight ${escapeHtml(item.level)}"><i></i><div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.text)}</p></div></div>`).join("");
+  const ex = result.exports;
+  $("downloads").innerHTML = [
+    ex.airfoil_dat ? downloadLink(ex.airfoil_filename, ex.airfoil_dat, "text/plain", "Airfoil · DAT") : "",
+    ex.xfoil_polar_csv ? downloadLink(ex.xfoil_polar_filename, ex.xfoil_polar_csv, "text/csv", "flow5/XFoil polar · CSV") : "",
+    ex.project_json ? downloadLink(ex.project_filename, ex.project_json, "application/json", "Profil projesi · JSON") : "",
+  ].filter(Boolean).join("");
+  $("methodText").textContent = `${result.model.airfoil}. Kanat geometrisi, yapı ve hidrofoil kontrolleri bu çalışmada yürütülmedi.`;
+  rememberAirfoilResult(result);
+  showState("resultState");
+}
+
 function renderResult(result) {
+  if (result.workflow_mode === "foil_only") { renderFoilOnlyResult(result); return; }
+  setWingResultVisibility(true);
+  configureExportPanel(false);
   lastResult = result; const wing = result.wing, g = wing.geometry, f = result.airfoil;
   $("resultTitle").textContent = f.name;
   const speedText = result.flow5_native ? `${fmt(result.flow.speed_min_m_s,1)}–${fmt(result.flow.speed_max_m_s,1)} m/s · ref ${fmt(result.flow.speed_m_s,1)}` : `${fmt(result.flow.speed_m_s,1)} m/s`;
@@ -733,6 +843,7 @@ function renderResult(result) {
   const structureText = result.structural_analysis?.enabled ? "Yapısal sonuçlar ön boyutlandırma taramasıdır; FEA değildir. " : "Yapısal denetim kapalıdır. ";
   const hydroText = result.hydro_analysis?.enabled ? "Kavitasyon/serbest-yüzey sonuçları ön taramadır; çok-fazlı CFD değildir." : "Hidrofoil fiziği uygulanmadı.";
   $("methodText").textContent = `${result.model.airfoil}; ${result.model.wing}. ${result.flow5_native ? "AeroOpt aerodinamik korelasyonu amaç fonksiyonuna girmez. " : ""}${structureText}${hydroText}`;
+  rememberAirfoilResult(result);
   showState("resultState");
 }
 
@@ -776,7 +887,39 @@ function toggleSolverSettings() {
   $("legacySettings").classList.toggle("hidden", native);
 }
 function toggleBaselineInput() {
-  $("customBaselineField").classList.toggle("hidden", $("baselineAirfoil").value !== "custom_dat");
+  $("customBaselineField").classList.toggle(
+    "hidden",
+    $("optimizationMode").value === "wing_only" || $("baselineAirfoil").value !== "custom_dat"
+  );
+}
+function updateSavedAirfoilStatus() {
+  const saved = readSavedAirfoil();
+  const option = $("wingAirfoilSource").querySelector('option[value="saved"]');
+  option.disabled = !saved;
+  option.textContent = saved ? `Son optimize profil · ${saved.name}` : "Son optimize edilen profil · henüz yok";
+  $("savedAirfoilStatus").textContent = saved
+    ? `${saved.name} hazır · ${new Date(saved.created_at).toLocaleString("tr-TR")}`
+    : "Henüz bu tarayıcıda kaydedilmiş optimize profil yok.";
+  if (!saved && $("wingAirfoilSource").value === "saved") $("wingAirfoilSource").value = "file";
+}
+function toggleWingAirfoilSource() {
+  $("wingAirfoilFileField").classList.toggle("hidden", $("wingAirfoilSource").value !== "file");
+}
+function toggleWorkflowMode() {
+  const mode = $("optimizationMode").value;
+  $("wingAirfoilFields").classList.toggle("hidden", mode !== "wing_only");
+  $("wingEnvelopeSection").classList.toggle("workflow-disabled", mode === "foil_only");
+  $("profileEnvelopeSection").classList.toggle("workflow-disabled", mode === "wing_only");
+  $("flow5CoupledIterations").disabled = mode !== "coupled";
+  $("spanwiseFoilOptimization").disabled = mode !== "coupled";
+  $("runButton").querySelector("span").textContent = mode === "foil_only"
+    ? "Profil optimizasyonunu başlat"
+    : mode === "wing_only"
+      ? "Kanat optimizasyonunu başlat"
+      : "Optimizasyonu başlat";
+  updateSavedAirfoilStatus();
+  toggleWingAirfoilSource();
+  toggleBaselineInput();
 }
 function toggleOptionalPanels() {
   $("structureFields").classList.toggle("disabled-fields", !$("structureEnabled").checked);
@@ -790,6 +933,8 @@ function toggleOptionalPanels() {
 }
 $("airfoilStrategy").addEventListener("change", toggleSolverSettings);
 $("baselineAirfoil").addEventListener("change", toggleBaselineInput);
+$("optimizationMode").addEventListener("change", toggleWorkflowMode);
+$("wingAirfoilSource").addEventListener("change", toggleWingAirfoilSource);
 ["structureEnabled","hydroEnabled","multiSectionGeometry","spanwiseFoilOptimization","meshConvergence","surrogateEnabled","budgetEscalation","validationEnabled"].forEach((id) => $(id).addEventListener("change", toggleOptionalPanels));
 [$("paretoX"), $("paretoY")].forEach((element) => element.addEventListener("change", () => { if (lastResult) renderPareto(lastResult); }));
 [$("historyA"), $("historyB")].forEach((element) => element.addEventListener("change", renderHistory));
@@ -807,6 +952,7 @@ $("cancelButton").addEventListener("click", async () => {
 toggleSolverSettings();
 toggleBaselineInput();
 toggleOptionalPanels();
+toggleWorkflowMode();
 $("designForm").addEventListener("submit", optimize);
 $("dismissError").addEventListener("click", () => { showState(lastResult ? "resultState" : "emptyState"); window.scrollTo({ top: 0, behavior: "smooth" }); });
 $("resetButton").addEventListener("click", async () => {
