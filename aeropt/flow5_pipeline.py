@@ -195,9 +195,10 @@ def _native_insights(
                 "level": "good" if coupled_design.get("converged") else "warn",
                 "title": "Foil–kanat geri beslemesi tamamlandı",
                 "text": (
-                    f"{coupled_design.get('iterations_completed', 1)} bağlı iterasyonda gerçek MAC/Re ve "
-                    f"spanwise kesit Cl yükleri profile geri beslendi; seçilen çift iterasyon "
-                    f"{coupled_design.get('selected_iteration', 1)}."
+                    f"{coupled_design.get('iterations_completed', 1)} profil–kanat turu ve "
+                    f"{coupled_design.get('feedback_cycles_completed', 0)} gerçek MAC/Re + spanwise kesit Cl geri beslemesi tamamlandı; "
+                    f"çıktı son profil–kanat çifti olan "
+                    f"{coupled_design.get('selected_iteration', 1)}. turdan üretildi."
                 ),
             }
         )
@@ -797,6 +798,15 @@ def run_flow5_native_design(
     for iteration in range(effective_coupled_iterations):
         active_iteration = iteration
         iteration_seed = settings.seed + 1009 * iteration
+        iteration_input_source = (
+            ("estimated_seed" if design_cl_was_auto else "user_seed")
+            if iteration == 0
+            else "previous_wing"
+        )
+        iteration_reynolds = [
+            float(fluid.reynolds(speed, iteration_reference_chord))
+            for speed in speeds
+        ]
         if workflow_mode == "wing_only":
             foil, foil_response, foil_meta, selected_foil_dat_text = (
                 evaluate_fixed_airfoil_with_flow5(
@@ -925,12 +935,14 @@ def run_flow5_native_design(
                 },
             ),
         )
-        updated_cls = (
-            _representative_section_cls(wing)
-            if design_cl_was_auto
-            else list(iteration_target_cls)
-        )
+        # A manually entered Cl is an initial seed, not a lock.  Every solved
+        # wing supplies the representative section loads and actual MAC for
+        # the next foil pass.
+        updated_cls = _representative_section_cls(wing)
         updated_chord = float(wing["geometry"]["mean_aerodynamic_chord"])
+        updated_reynolds = [
+            float(fluid.reynolds(speed, updated_chord)) for speed in speeds
+        ]
         cl_change = max(
             (
                 100.0 * abs(new - old) / max(abs(old), 1e-9)
@@ -942,6 +954,13 @@ def run_flow5_native_design(
             100.0
             * abs(updated_chord - iteration_reference_chord)
             / max(abs(iteration_reference_chord), 1e-9)
+        )
+        reynolds_change = max(
+            (
+                100.0 * abs(new - old) / max(abs(old), 1e-9)
+                for new, old in zip(updated_reynolds, iteration_reynolds)
+            ),
+            default=0.0,
         )
         objective = float(wing_meta["objective"])
         objective_change = (
@@ -965,18 +984,23 @@ def run_flow5_native_design(
                 "rectangular_baseline": baseline,
                 "wing_meta": wing_meta,
                 "wing_response": wing_response,
+                "input_source": iteration_input_source,
                 "reference_chord_m": iteration_reference_chord,
+                "reynolds": iteration_reynolds,
                 "target_cls": list(iteration_target_cls),
                 "next_reference_chord_m": updated_chord,
+                "next_reynolds": updated_reynolds,
                 "next_target_cls": updated_cls,
                 "cl_schedule_change_percent": float(cl_change),
                 "reference_chord_change_percent": chord_change,
+                "reynolds_schedule_change_percent": float(reynolds_change),
                 "objective_change_percent": objective_change,
             }
         )
         if (
             iteration > 0
             and cl_change <= settings.coupling_cl_tolerance_percent
+            and reynolds_change <= settings.coupling_cl_tolerance_percent
             and objective_change is not None
             and objective_change <= settings.coupling_objective_tolerance_percent
         ):
@@ -995,13 +1019,18 @@ def run_flow5_native_design(
             solver_point_count=settings.foil_coordinate_points,
         )
 
-    selected_iteration = min(
+    best_iteration = min(
         iteration_results,
         key=lambda item: (
             not bool(item["wing_meta"]["feasible"]),
             float(item["wing_meta"]["objective"]),
         ),
     )
+    # The coupled result must be self-consistent: the final reported wing is
+    # always the wing solved with the final reported foil.  Keep the best
+    # historical objective as diagnostics, but never replace the final pair
+    # with an earlier iteration.
+    selected_iteration = iteration_results[-1]
     foil = selected_iteration["foil"]
     foil_response = selected_iteration["foil_response"]
     foil_meta = selected_iteration["foil_meta"]
@@ -1019,19 +1048,33 @@ def run_flow5_native_design(
             "foil_objective": float(item["foil_meta"]["objective"]),
             "wing_objective": float(item["wing_meta"]["objective"]),
             "feasible": bool(item["wing_meta"]["feasible"]),
+            "input_source": item["input_source"],
+            "baseline_identifier": item["baseline_profile"].identifier,
+            "baseline_display_name": item["baseline_profile"].display_name,
             "reference_chord_m": float(item["reference_chord_m"]),
+            "reynolds": item["reynolds"],
             "target_cls": item["target_cls"],
             "next_reference_chord_m": float(item["next_reference_chord_m"]),
+            "next_reynolds": item["next_reynolds"],
             "next_target_cls": item["next_target_cls"],
             "cl_schedule_change_percent": float(item["cl_schedule_change_percent"]),
             "reference_chord_change_percent": float(
                 item["reference_chord_change_percent"]
             ),
+            "reynolds_schedule_change_percent": float(
+                item["reynolds_schedule_change_percent"]
+            ),
             "objective_change_percent": item["objective_change_percent"],
+            "feedback_applied": int(item["iteration"]) < len(iteration_results),
+            "best_objective_iteration": item is best_iteration,
             "selected": item is selected_iteration,
         }
         for item in iteration_results
     ]
+    reference_condition_index = min(
+        range(len(speeds)), key=lambda index: abs(speeds[index] - reference_speed_m_s)
+    )
+    final_design_cl_at_reference = float(target_cls[reference_condition_index])
 
     section_foils: tuple[
         CSTAirfoilDesign, CSTAirfoilDesign, CSTAirfoilDesign
@@ -1283,7 +1326,8 @@ def run_flow5_native_design(
             "speed_samples": speed_samples,
             "foil_candidate_budget": settings.foil_candidate_budget,
             "foil_coordinate_points": settings.foil_coordinate_points,
-            "baseline_airfoil": baseline_profile.identifier,
+            "baseline_airfoil": settings.baseline_profile.identifier,
+            "final_iteration_baseline_airfoil": baseline_profile.identifier,
             "cst_order": settings.cst_order,
             "wing_candidate_budget": settings.wing_candidate_budget,
             "budget_escalation": settings.budget_escalation_settings.to_dict(),
@@ -1303,6 +1347,7 @@ def run_flow5_native_design(
             "coupled_iterations_requested": effective_coupled_iterations,
             "coupled_iterations_completed": len(coupling_history),
             "selected_coupled_iteration": int(selected_iteration["iteration"]),
+            "best_objective_coupled_iteration": int(best_iteration["iteration"]),
             "solver": wing_meta.get("solver", {}),
             "evaluation_cache": runner.cache_stats(),
             "optimizer_checkpoint": checkpoint_store.stats(),
@@ -1323,11 +1368,14 @@ def run_flow5_native_design(
             "mach": fluid.mach(reference_speed_m_s),
         },
         "airfoil": foil.to_dict(),
+        "initial_baseline_airfoil": settings.baseline_profile.to_dict(),
         "baseline_airfoil": foil_meta["baseline"],
         "airfoil_optimization": {
             **foil_meta,
             "design_cl_was_auto": design_cl_was_auto,
-            "design_cl_at_reference": design_cl_at_reference,
+            "design_cl_seed_only": workflow_mode == "coupled",
+            "initial_design_cl_at_reference": design_cl_at_reference,
+            "design_cl_at_reference": final_design_cl_at_reference,
             "target_cls": target_cls,
             "reynolds": reference_polar["reynolds"],
             "mach": reference_polar["mach"],
@@ -1361,9 +1409,17 @@ def run_flow5_native_design(
             "iterations_requested": effective_coupled_iterations,
             "iterations_completed": len(coupling_history),
             "selected_iteration": int(selected_iteration["iteration"]),
+            "best_objective_iteration": int(best_iteration["iteration"]),
+            "feedback_cycles_completed": max(len(coupling_history) - 1, 0),
             "cl_tolerance_percent": settings.coupling_cl_tolerance_percent,
             "objective_tolerance_percent": settings.coupling_objective_tolerance_percent,
-            "explicit_design_cl_locked": not design_cl_was_auto,
+            "initial_design_cl_source": (
+                "estimated" if design_cl_was_auto else "user"
+            ),
+            "initial_design_cl_at_reference": design_cl_at_reference,
+            "final_design_cl_at_reference": final_design_cl_at_reference,
+            "manual_design_cl_is_seed_only": workflow_mode == "coupled",
+            "explicit_design_cl_locked": False,
             "history": coupling_history,
         },
         "spanwise_airfoil_optimization": spanwise_airfoil_meta,
