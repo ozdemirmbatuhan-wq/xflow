@@ -10,8 +10,24 @@ let lastResult = null;
 let activeJobId = null;
 
 function numberValue(id) {
-  const value = Number($(id).value);
-  if (!Number.isFinite(value)) throw new Error(`${$(id).labels?.[0]?.textContent || id} için sayı girin.`);
+  const input = $(id);
+  const label = input.labels?.[0]?.textContent || id;
+  const raw = String(input.value ?? "").trim();
+  if (raw === "") throw new Error(`${label} için sayı girin.`);
+  const value = Number(raw);
+  if (!Number.isFinite(value)) throw new Error(`${label} için geçerli bir sayı girin.`);
+  if (input.min !== "") {
+    const minimum = Number(input.min);
+    if (Number.isFinite(minimum) && value < minimum) {
+      throw new Error(`${label} en az ${input.min} olmalı.`);
+    }
+  }
+  if (input.max !== "") {
+    const maximum = Number(input.max);
+    if (Number.isFinite(maximum) && value > maximum) {
+      throw new Error(`${label} en fazla ${input.max} olmalı.`);
+    }
+  }
   return value;
 }
 
@@ -48,7 +64,7 @@ async function collectRequest() {
       camber_position_max_percent: numberValue("camberPosMax"),
       thickness_min_percent: numberValue("thicknessMin"),
       thickness_max_percent: numberValue("thicknessMax"),
-      design_cl: optionalCl === "" ? null : Number(optionalCl),
+      design_cl: optionalCl === "" ? null : numberValue("designCl"),
     },
     wing: {
       span_min_m: numberValue("spanMin"), span_max_m: numberValue("spanMax"),
