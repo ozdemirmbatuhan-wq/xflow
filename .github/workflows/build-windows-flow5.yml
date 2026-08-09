@@ -2,9 +2,6 @@ name: Build Windows EXE with flow5 7.57
 
 "on":
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: read
@@ -20,17 +17,17 @@ jobs:
 
     steps:
       - name: Check out AeroOpt
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Check out pinned flow5 7.57 source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: techwinder/flow5
           ref: ${{ env.FLOW5_SHA }}
           path: deps/flow5
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -56,20 +53,76 @@ jobs:
         with:
           arch: x64
 
-      - name: Install OpenBLAS
+      - name: Download pinned OpenBLAS 0.3.34
         shell: pwsh
         run: |
-          $vcpkgRoot = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
-          & "$vcpkgRoot\vcpkg.exe" install openblas:x64-windows
-          if ($LASTEXITCODE -ne 0) { throw "OpenBLAS installation failed" }
-          "OPENBLAS_ROOT=$vcpkgRoot\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $version = "0.3.34"
+          $archive = "$PWD\deps\downloads\OpenBLAS-$version-x64.zip"
+          $root = "$PWD\deps\openblas"
+          $expectedSha256 = "e9cb6134541f36c27346d5fc5995652f060fba227cebbbabcbda5a5a44d7c76b"
+
+          New-Item -ItemType Directory -Force "$PWD\deps\downloads", $root | Out-Null
+          Invoke-WebRequest `
+            "https://github.com/OpenMathLib/OpenBLAS/releases/download/v$version/OpenBLAS-$version-x64.zip" `
+            -OutFile $archive
+
+          $actualSha256 = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "OpenBLAS archive checksum mismatch: $actualSha256"
+          }
+
+          Expand-Archive $archive $root -Force
+
+          # flow5 7.57 includes <openblas/cblas.h> and
+          # <openblas/lapack.h>; the official archive keeps these at
+          # include/*.h. Preserve the originals and add the layout flow5 uses.
+          $qualifiedHeaders = Join-Path $root "include\openblas"
+          New-Item -ItemType Directory -Force $qualifiedHeaders | Out-Null
+          Copy-Item (Join-Path $root "include\*.h") $qualifiedHeaders -Force
+
+          $required = @(
+            "include\openblas\cblas.h",
+            "include\openblas\lapack.h",
+            "include\openblas\lapacke_config.h",
+            "include\openblas\lapacke_mangling.h",
+            "lib\libopenblas.lib",
+            "bin\libopenblas.dll"
+          )
+          foreach ($relative in $required) {
+            if (-not (Test-Path (Join-Path $root $relative))) {
+              throw "OpenBLAS package is missing $relative"
+            }
+          }
+
+          $openBlasDll = Join-Path $root "bin\libopenblas.dll"
+          $headers = (& dumpbin /nologo /headers $openBlasDll 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $headers -notmatch '(?i)8664 machine \(x64\)') {
+            throw "OpenBLAS runtime is not a valid x64 DLL"
+          }
+          $exports = (& dumpbin /nologo /exports $openBlasDll 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "Could not inspect OpenBLAS exports" }
+          $requiredSymbols = @(
+            "cblas_dgemm", "cblas_dgemv", "cblas_sgemv",
+            "dgels_", "dgetrf_", "dgetri_", "dgetrs_", "sgetrf_", "sgetrs_"
+          )
+          foreach ($symbol in $requiredSymbols) {
+            $symbolPattern = '(?m)\s+' + [regex]::Escape($symbol) + '\s*$'
+            if ($exports -notmatch $symbolPattern) {
+              throw "OpenBLAS runtime is missing required symbol $symbol"
+            }
+          }
+
+          "OPENBLAS_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Download pinned OCCT and Gmsh SDKs
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $ProgressPreference = "SilentlyContinue"
-          New-Item -ItemType Directory -Force deps/downloads, deps/occt, deps/thirdparty, deps/gmsh | Out-Null
+          $sdkDirectories = @("deps/downloads", "deps/occt", "deps/thirdparty", "deps/gmsh")
+          New-Item -ItemType Directory -Force -Path $sdkDirectories | Out-Null
 
           $occtBundle = "deps/downloads/occt-release.zip"
           $occtBundleDir = "deps/downloads/occt-release"
@@ -78,19 +131,34 @@ jobs:
           Invoke-WebRequest "https://github.com/Open-Cascade-SAS/OCCT/releases/download/V7_9_2/3rdparty-vc14-64.zip" -OutFile deps/downloads/thirdparty.zip
           Invoke-WebRequest "https://gmsh.info/bin/Windows/gmsh-4.14.1-Windows64-sdk.zip" -OutFile deps/downloads/gmsh.zip
 
+          $downloadHashes = @{
+            "deps/downloads/occt-release.zip" = "e3c75156d195fa28fc61b0fe6e163303e7130c570076a1e9e6cb5cf74d29d7bb"
+            "deps/downloads/thirdparty.zip" = "529138c4aba4753402c414615ef5caa791e5a24934bcf8803dab0e4e24edf5f4"
+            "deps/downloads/gmsh.zip" = "0220812a7afd177b7d7bc28bea7cfaab6c803f1039eea860bdc3ff3b2bc36408"
+          }
+          foreach ($download in $downloadHashes.GetEnumerator()) {
+            $actual = (Get-FileHash $download.Key -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $download.Value) {
+              throw "SDK archive checksum mismatch for $($download.Key): $actual"
+            }
+          }
+
           Expand-Archive $occtBundle $occtBundleDir -Force
           $occtArchive = Get-ChildItem $occtBundleDir -File -Filter "opencascade-*.zip" | Select-Object -First 1
           if (-not $occtArchive) { throw "OCCT inner archive was not found" }
 
           Expand-Archive $occtArchive.FullName deps/occt -Force
-          Expand-Archive deps/downloads/thirdparty.zip deps/thirdparty -Force
+          $thirdPartyBundleDir = "deps/downloads/thirdparty-release"
+          Expand-Archive deps/downloads/thirdparty.zip $thirdPartyBundleDir -Force
+          $thirdPartyArchive = Get-ChildItem $thirdPartyBundleDir -File -Filter "3rdparty-*.zip" | Select-Object -First 1
+          if (-not $thirdPartyArchive) { throw "OCCT third-party inner archive was not found" }
+          Expand-Archive $thirdPartyArchive.FullName deps/thirdparty -Force
           Expand-Archive deps/downloads/gmsh.zip deps/gmsh -Force
 
           $occ = Get-ChildItem deps/occt -Directory -Recurse | Where-Object {
             (Test-Path (Join-Path $_.FullName "inc/Standard.hxx")) -and
             (Test-Path (Join-Path $_.FullName "win64/vc14/lib/TKernel.lib"))
           } | Select-Object -First 1
-
           $gmsh = Get-ChildItem deps/gmsh -Directory -Recurse | Where-Object {
             (Test-Path (Join-Path $_.FullName "include/gmsh.h")) -and
             (Test-Path (Join-Path $_.FullName "lib/gmsh.dll.lib"))
@@ -105,12 +173,30 @@ jobs:
       - name: Build flow5 libraries and AeroOpt runner
         shell: pwsh
         run: |
-          & ci/build_flow5_windows.ps1 -Flow5Source "$PWD\deps\flow5" -OccRoot $env:OCCT_ROOT -GmshRoot $env:GMSH_ROOT -OpenBlasRoot $env:OPENBLAS_ROOT -BridgeBuild "$PWD\build\flow5-runner"
+          $buildScript = Join-Path $PWD "ci\build_flow5_windows.ps1"
+          $buildArguments = @{
+            Flow5Source = "$PWD\deps\flow5"
+            OccRoot = $env:OCCT_ROOT
+            GmshRoot = $env:GMSH_ROOT
+            OpenBlasRoot = $env:OPENBLAS_ROOT
+            BridgeBuild = "$PWD\build\flow5-runner"
+          }
+          & $buildScript @buildArguments
 
       - name: Collect flow5 runtime DLLs
         shell: pwsh
         run: |
-          & ci/collect_flow5_runtime.ps1 -Runner "$PWD\build\flow5-runner\Release\aeropt-flow5-runner.exe" -Flow5Source "$PWD\deps\flow5" -OccRoot $env:OCCT_ROOT -ThirdPartyRoot "$PWD\deps\thirdparty" -GmshRoot $env:GMSH_ROOT -OpenBlasRoot $env:OPENBLAS_ROOT -Destination "$PWD\build\flow5-runtime"
+          $collectorScript = Join-Path $PWD "ci\collect_flow5_runtime.ps1"
+          $collectorArguments = @{
+            Runner = "$PWD\build\flow5-runner\Release\aeropt-flow5-runner.exe"
+            Flow5Source = "$PWD\deps\flow5"
+            OccRoot = $env:OCCT_ROOT
+            ThirdPartyRoot = "$PWD\deps\thirdparty"
+            GmshRoot = $env:GMSH_ROOT
+            OpenBlasRoot = $env:OPENBLAS_ROOT
+            Destination = "$PWD\build\flow5-runtime"
+          }
+          & $collectorScript @collectorArguments
 
       - name: Smoke-test real flow5 analyses
         shell: pwsh
