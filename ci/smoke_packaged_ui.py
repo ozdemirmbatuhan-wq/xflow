@@ -60,7 +60,8 @@ def main() -> None:
                 return
             route.continue_()
 
-        page.route("**/api/jobs*", handle_jobs)
+        page.route("**/api/jobs", handle_jobs)
+        page.route("**/api/jobs/**", handle_jobs)
         page.goto(base_url, wait_until="networkidle")
 
         if page.title() != "AeroOpt — Airfoil & Kanat Optimizasyonu":
