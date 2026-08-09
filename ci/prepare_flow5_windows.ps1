@@ -35,6 +35,9 @@ $openBlasLib = To-QMakePath (Join-Path $OpenBlasRoot "lib")
 $openBlasLibrary = To-QMakePath (Join-Path $OpenBlasRoot "lib\libopenblas.lib")
 
 $requiredDependencies = @(
+    (Join-Path $GmshRoot "include\gmsh.h_cwrap"),
+    (Join-Path $GmshRoot "include\gmshc.h"),
+    (Join-Path $GmshRoot "lib\gmsh.dll.lib"),
     (Join-Path $OpenBlasRoot "include\openblas\cblas.h"),
     (Join-Path $OpenBlasRoot "include\openblas\lapack.h"),
     (Join-Path $OpenBlasRoot "include\openblas\lapacke_config.h"),
@@ -44,9 +47,29 @@ $requiredDependencies = @(
 )
 foreach ($dependency in $requiredDependencies) {
     if (-not (Test-Path $dependency)) {
-        throw "Required OpenBLAS/LAPACK file was not found: $dependency"
+        throw "Required flow5 SDK file was not found: $dependency"
     }
 }
+
+# The official binary Gmsh SDK can be built with a C++ compiler ABI that is
+# incompatible with MSVC. Its gmsh.h_cwrap header exposes the same C++ API as
+# inline wrappers over the stable C ABI, whose symbols are present in
+# gmsh.dll.lib. Patch the one native Gmsh include in pinned flow5 7.57 before
+# compiling the library; otherwise the final link fails with unresolved
+# gmsh::model::*, gmsh::logger::* and related C++ symbols.
+$gmeshGlobals = Join-Path $Flow5Source "flow5-lib\api\gmesh_globals.h"
+$gmeshText = Get-Content -Raw -Path $gmeshGlobals
+$nativeGmshInclude = '#include <gmsh.h>'
+$wrappedGmshInclude = '#include <gmsh.h_cwrap>'
+$nativeGmshCount = ([regex]::Matches($gmeshText, [regex]::Escape($nativeGmshInclude))).Count
+$wrappedGmshCount = ([regex]::Matches($gmeshText, [regex]::Escape($wrappedGmshInclude))).Count
+if ($nativeGmshCount -eq 1 -and $wrappedGmshCount -eq 0) {
+    $gmeshText = $gmeshText.Replace($nativeGmshInclude, $wrappedGmshInclude)
+}
+elseif ($nativeGmshCount -ne 0 -or $wrappedGmshCount -ne 1) {
+    throw "Unexpected Gmsh include layout in pinned flow5 7.57: native=$nativeGmshCount, wrapper=$wrappedGmshCount"
+}
+Set-Content -Path $gmeshGlobals -Value $gmeshText -Encoding utf8
 
 $projects = @(
     (Join-Path $Flow5Source "flow5-lib\flow5-lib.pro"),
@@ -140,4 +163,4 @@ if ($badGetrsCount -notin @(0, 1)) {
 $panelText = $panelText.Replace($badGetrsCall, $goodGetrsCall)
 Set-Content -Path $panelAnalysis -Value $panelText -Encoding utf8
 
-Write-Host "flow5 qmake projects configured for OCCT, Gmsh and OpenBLAS/LAPACK"
+Write-Host "flow5 qmake projects configured for OCCT, Gmsh C-ABI wrapper and OpenBLAS/LAPACK"
