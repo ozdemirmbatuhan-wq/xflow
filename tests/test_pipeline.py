@@ -68,6 +68,7 @@ class PipelineTests(unittest.TestCase):
             )
 
     def test_default_request_not_mutated(self):
+        self.assertEqual(DEFAULT_REQUEST["workflow"]["mode"], "coupled")
         self.assertEqual(DEFAULT_REQUEST["solver"]["quality"], "balanced")
         self.assertEqual(DEFAULT_REQUEST["solver"]["parallel_workers"], 16)
         self.assertEqual(DEFAULT_REQUEST["solver"]["airfoil_strategy"], "flow5_native")
