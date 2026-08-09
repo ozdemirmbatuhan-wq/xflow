@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from aeropt.baselines import build_baseline_profile
 from aeropt.flow5 import Flow5Runner
