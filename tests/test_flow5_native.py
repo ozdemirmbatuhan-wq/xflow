@@ -33,6 +33,7 @@ class Flow5NativePipelineTests(unittest.TestCase):
                         "speed_samples": 3,
                         "target_lift_n": 40.0,
                     },
+                    "airfoil": {"design_cl": 0.70},
                     "solver": {
                         "airfoil_strategy": "flow5_native",
                         "flow5_runner_path": str(FAKE_RUNNER),
@@ -70,6 +71,32 @@ class Flow5NativePipelineTests(unittest.TestCase):
         self.assertIn("coupled_design", result)
         self.assertFalse(result["structural_analysis"]["enabled"])
         json.dumps(result, allow_nan=False)
+
+    def test_manual_cl_is_only_the_first_seed_and_final_pair_is_returned(self):
+        coupled = self.result["coupled_design"]
+        history = coupled["history"]
+
+        self.assertEqual(coupled["initial_design_cl_source"], "user")
+        self.assertTrue(coupled["manual_design_cl_is_seed_only"])
+        self.assertFalse(coupled["explicit_design_cl_locked"])
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0]["input_source"], "user_seed")
+        self.assertEqual(history[1]["input_source"], "previous_wing")
+        self.assertAlmostEqual(history[0]["target_cls"][1], 0.70, places=12)
+        self.assertEqual(history[1]["target_cls"], history[0]["next_target_cls"])
+        self.assertEqual(history[1]["reynolds"], history[0]["next_reynolds"])
+        self.assertNotAlmostEqual(
+            history[1]["target_cls"][1], history[0]["target_cls"][1], places=4
+        )
+        self.assertFalse(history[0]["selected"])
+        self.assertTrue(history[-1]["selected"])
+        self.assertEqual(coupled["selected_iteration"], history[-1]["iteration"])
+        self.assertEqual(self.result["solver_run"]["selected_coupled_iteration"], 2)
+        self.assertAlmostEqual(
+            self.result["airfoil_optimization"]["design_cl_at_reference"],
+            history[-1]["target_cls"][1],
+            places=12,
+        )
 
     def test_real_project_payload_is_required_and_packaged(self):
         exports = self.result["exports"]
@@ -133,8 +160,13 @@ class Flow5NativePipelineTests(unittest.TestCase):
 
     def test_e818_baseline_is_compared_before_the_same_100_point_foil_enters_wing_search(self):
         foil_meta = self.result["airfoil_optimization"]
-        self.assertEqual(foil_meta["baseline"]["identifier"], "e818")
-        self.assertEqual(foil_meta["baseline"]["cst_order"], 6)
+        initial_baseline = self.result["initial_baseline_airfoil"]
+        self.assertEqual(initial_baseline["identifier"], "e818")
+        self.assertEqual(initial_baseline["cst_order"], 6)
+        self.assertEqual(
+            self.result["coupled_design"]["history"][0]["baseline_identifier"],
+            "e818",
+        )
         self.assertTrue(foil_meta["baseline"]["search_converged"])
         self.assertEqual(foil_meta["solver_coordinate_points"], 100)
         self.assertEqual(self.result["wing_optimization"]["foil_coordinate_points"], 100)
