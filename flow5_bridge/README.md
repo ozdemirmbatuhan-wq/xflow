@@ -22,7 +22,7 @@ Gerekenler:
 1. Visual Studio 2022 “Desktop development with C++”.
 2. CMake 3.20+.
 3. flow5 v7.57 kaynak kodu ve onun başarılı **Release** derlemesi.
-4. flow5'i derlerken kullandığınız aynı Qt 6, Gmsh SDK, OpenCascade ve Intel oneAPI MKL kurulumu.
+4. flow5'i derlerken kullandığınız aynı Qt 6, Gmsh SDK, OpenCascade ve OpenBLAS kurulumu. CI, LAPACK dahil resmî `OpenBLAS-0.3.34-x64.zip` paketini kullanır.
 
 Önce kaynak sürümünü sabitleyin ve flow5'in kendi `API_examples/PlaneRun1` örneğini derleyebildiğinizi doğrulayın:
 
@@ -32,7 +32,7 @@ cd C:\dev\flow5-7.57
 git checkout a9e852c559590188e00e9efe997c35c1dec7209b
 ```
 
-Intel oneAPI Command Prompt kullanmıyorsanız CMake'den önce oneAPI `setvars.bat` betiğini çalıştırın; `find_package(MKL)` ve `find_package(TBB)` aynı flow5 yapılandırmasını bulmalıdır.
+Resmî OpenBLAS Windows arşivini açın. Arşiv başlıkları `include` kökünde gelir; aşağıdaki betik flow5'in beklediği `include\openblas` görünümünü otomatik oluşturur. Elle derlediğiniz flow5 kütüphaneleri de aynı LP64 OpenBLAS paketiyle bağlanmış olmalıdır.
 
 “x64 Native Tools Command Prompt for VS 2022” içinde örnek:
 
@@ -42,7 +42,8 @@ powershell -ExecutionPolicy Bypass -File .\flow5_bridge\build_windows.ps1 `
   -Flow5Build C:\dev\build-flow5-7.57 `
   -QtRoot C:\Qt\6.9.1\msvc2022_64 `
   -GmshRoot C:\SDK\gmsh-4.14.1-Windows64-sdk `
-  -OccInclude C:\SDK\OpenCASCADE-7.9.2\inc `
+  -OccRoot C:\SDK\opencascade-7.9.2-vc14-64 `
+  -OpenBlasRoot C:\SDK\OpenBLAS-0.3.34-x64 `
   -BuildDir C:\dev\build-aeropt-flow5-runner
 ```
 
@@ -52,7 +53,7 @@ powershell -ExecutionPolicy Bypass -File .\flow5_bridge\build_windows.ps1 `
 C:\dev\build-aeropt-flow5-runner\Release\aeropt-flow5-runner.exe
 ```
 
-Flow5, Qt, Gmsh, MKL ve TBB DLL'lerinin runner tarafından bulunabilmesi gerekir. En temiz yöntem, flow5'in çalışabildiği Release klasöründeki aynı DLL'leri runner EXE'sinin yanına koymak veya ilgili `bin` klasörlerini `PATH` değişkenine eklemektir.
+Flow5, Qt, Gmsh, OpenBLAS ve OCCT DLL'lerinin runner tarafından bulunabilmesi gerekir. En temiz yöntem, GitHub Actions paketini kullanmaktır; elle derlemede aynı release DLL'lerini runner EXE'sinin yanına koyun veya ilgili `bin` klasörlerini `PATH` değişkenine ekleyin.
 
 Arayüzde **flow5 runner yolu** alanına `aeropt-flow5-runner.exe` yolunu girin; `flow5.exe` yolunu girmeyin.
 

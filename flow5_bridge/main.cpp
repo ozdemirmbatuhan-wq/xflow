@@ -19,6 +19,15 @@
 #include <QJsonObject>
 #include <QString>
 
+#ifdef _MSC_VER
+// The binary Gmsh SDK recommends this C-API-backed wrapper when the SDK's C++
+// compiler ABI is not guaranteed to match.  It must be included before
+// flow5's api.h, which otherwise includes gmsh.h with the same include guard.
+#include <gmsh.h_cwrap>
+#else
+#include <gmsh.h>
+#endif
+
 #include <api.h>
 #include <flow5-io.h>
 #include <foil.h>
@@ -35,11 +44,6 @@
 #include <polarnamemaker.h>
 #include <xfoiltask.h>
 #include <wingopp.h>
-#ifdef _MSC_VER
-#include <gmsh.h_cwrap>
-#else
-#include <gmsh.h>
-#endif
 
 #ifndef AEROPT_FLOW5_VERSION
 #define AEROPT_FLOW5_VERSION "7.57"
