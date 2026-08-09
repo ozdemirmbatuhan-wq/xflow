@@ -139,7 +139,7 @@
               <div class="range-pair"><label>Min<input id="thicknessMin" type="number" min="5" max="24" step="any" value="7"></label><span>—</span><label>Max<input id="thicknessMax" type="number" min="5" max="24" step="any" value="18"></label></div>
             </div>
             <div class="field full">
-              <label for="designCl">Profil tasarım C<sub>L</sub> <em>boş = otomatik</em></label>
+              <label for="designCl">İlk tur profil tasarım C<sub>L</sub> <em>boş = otomatik</em></label>
               <input id="designCl" type="number" min="0.1" max="1.6" step="any" placeholder="Otomatik">
             </div>
           </section>
@@ -176,10 +176,11 @@
                 <div class="field-grid two">
                   <div class="field"><label for="flow5FoilOptimizer">Foil optimizeri</label><select id="flow5FoilOptimizer"><option value="differential_evolution" selected>Differential Evolution</option><option value="adaptive_elite">Adaptive elite</option></select></div>
                   <div class="field"><label for="flow5WingOptimizer">Kanat optimizeri</label><select id="flow5WingOptimizer"><option value="nsga2" selected>NSGA-II · gerçek çok amaçlı</option><option value="differential_evolution">Differential Evolution</option><option value="adaptive_elite">Adaptive elite</option></select></div>
-                  <div class="field"><label for="flow5CoupledIterations">Foil–kanat iterasyonu</label><input id="flow5CoupledIterations" type="number" min="1" max="4" step="1" value="2"></div>
-                  <div class="field"><label for="flow5CouplingClTolerance">Bağlı Cl toleransı <em>%</em></label><input id="flow5CouplingClTolerance" type="number" min="0.1" max="25" step="any" value="3"></div>
+                  <div class="field"><label for="flow5CoupledIterations">Azami foil–kanat turu</label><input id="flow5CoupledIterations" type="number" min="1" max="8" step="1" value="2"></div>
+                  <div class="field"><label for="flow5CouplingClTolerance">Bağlı Cl/Re toleransı <em>%</em></label><input id="flow5CouplingClTolerance" type="number" min="0.1" max="25" step="any" value="3"></div>
                   <div class="field"><label for="flow5CouplingObjectiveTolerance">Bağlı amaç toleransı <em>%</em></label><input id="flow5CouplingObjectiveTolerance" type="number" min="0.05" max="25" step="any" value="1"></div>
                 </div>
+                <p class="solver-help"><strong>2 tur önerilir:</strong> Girdiğin ilk C<sub>L</sub> ile profil → kanat; ardından kanadın gerçek kesit C<sub>L</sub> dağılımı ve MAC/Re değeriyle yeni profil → final kanat. Daha yüksek değer aynı geri beslemeyi yineler; toleranslar sağlanırsa erken durur.</p>
                 <label class="switch-row"><input id="spanwiseFoilOptimization" type="checkbox"><span></span><b>Kök / orta / uç profillerini ayrı optimize et</b><em>uzun sürer</em></label>
                 <div id="spanwiseFoilFields" class="field-grid two">
                   <div class="field"><label for="spanwiseFoilBudgetFraction">Kesit bütçe oranı</label><input id="spanwiseFoilBudgetFraction" type="number" min="0.2" max="1" step="any" value="0.5"></div>
