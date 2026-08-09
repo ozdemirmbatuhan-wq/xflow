@@ -128,47 +128,69 @@ foreach ($root in $searchRoots) {
     }
 }
 
-$runnerDestination = Join-Path $Destination "aeropt-flow5-runner.exe"
-Copy-Item -Force $Runner $runnerDestination
+function Copy-DependencyClosure([string[]]$Roots) {
+    $queue = [System.Collections.Generic.Queue[string]]::new()
+    $queued = @{}
 
-$queue = [System.Collections.Generic.Queue[string]]::new()
-$queued = @{}
-$queue.Enqueue($runnerDestination)
-$queued[$runnerDestination.ToLowerInvariant()] = $true
+    foreach ($rootBinary in $Roots) {
+        if (-not (Test-Path $rootBinary)) {
+            throw "Dependency scan root was not found: $rootBinary"
+        }
+        $resolvedBinary = (Resolve-Path $rootBinary).Path
+        $queueKey = $resolvedBinary.ToLowerInvariant()
+        if (-not $queued.ContainsKey($queueKey)) {
+            $queue.Enqueue($resolvedBinary)
+            $queued[$queueKey] = $true
+        }
+    }
 
-while ($queue.Count -gt 0) {
-    $binary = $queue.Dequeue()
-    foreach ($dependency in (Get-ImportedDlls $binary)) {
-        $destinationDependency = Join-Path $Destination $dependency
-        if (Test-Path $destinationDependency) {
-            $queueKey = $destinationDependency.ToLowerInvariant()
-            if (-not $queued.ContainsKey($queueKey)) {
-                $queue.Enqueue($destinationDependency)
-                $queued[$queueKey] = $true
+    while ($queue.Count -gt 0) {
+        $binary = $queue.Dequeue()
+        foreach ($dependency in (Get-ImportedDlls $binary)) {
+            $destinationDependency = Join-Path $Destination $dependency
+            if (Test-Path $destinationDependency) {
+                $queueKey = $destinationDependency.ToLowerInvariant()
+                if (-not $queued.ContainsKey($queueKey)) {
+                    $queue.Enqueue($destinationDependency)
+                    $queued[$queueKey] = $true
+                }
+                continue
             }
-            continue
-        }
-        if (Is-WindowsSystemDll $dependency) { continue }
-        if (Is-WinDeployQtDependency $dependency) { continue }
+            if (Is-WindowsSystemDll $dependency) { continue }
+            if (Is-WinDeployQtDependency $dependency) { continue }
 
-        $sourceKey = $dependency.ToLowerInvariant()
-        if (-not $dllIndex.ContainsKey($sourceKey)) {
-            throw "No packaged SDK provides runtime dependency $dependency (required by $binary)"
+            $sourceKey = $dependency.ToLowerInvariant()
+            if (-not $dllIndex.ContainsKey($sourceKey)) {
+                throw "No packaged SDK provides runtime dependency $dependency (required by $binary)"
+            }
+            Copy-Item -Force $dllIndex[$sourceKey] $destinationDependency
+            Write-Host "Collected runtime dependency $dependency"
+            $queue.Enqueue($destinationDependency)
+            $queued[$destinationDependency.ToLowerInvariant()] = $true
         }
-        Copy-Item -Force $dllIndex[$sourceKey] $destinationDependency
-        $queue.Enqueue($destinationDependency)
-        $queued[$destinationDependency.ToLowerInvariant()] = $true
     }
 }
+
+$runnerDestination = Join-Path $Destination "aeropt-flow5-runner.exe"
+Copy-Item -Force $Runner $runnerDestination
+Copy-DependencyClosure -Roots @($runnerDestination)
 
 $windeployqt = (Get-Command windeployqt).Source
 & $windeployqt --release --no-translations --no-compiler-runtime --dir $Destination `
     $runnerDestination
 if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
 
-# Validate the complete, packaged dependency graph. At this point Qt and the
-# Visual C++ runtime must be present too; only Windows system DLLs may remain
-# outside the destination.
+# windeployqt adds Qt libraries after the first dependency pass. Resolve the
+# closure again from every deployed binary so dependencies introduced by Qt
+# itself (for example MSVCP140_1.dll) are collected before validation.
+$deployedBinaries = @($runnerDestination) + @(
+    Get-ChildItem -Path $Destination -Recurse -File -Filter "*.dll" |
+        ForEach-Object { $_.FullName }
+)
+Copy-DependencyClosure -Roots $deployedBinaries
+
+# Validate the complete packaged dependency graph. Only Windows system DLLs
+# may remain outside the destination.
 $packagedDlls = @{}
 Get-ChildItem -Path $Destination -Recurse -File -Filter "*.dll" | ForEach-Object {
     $packagedDlls[$_.Name.ToLowerInvariant()] = $_.FullName
