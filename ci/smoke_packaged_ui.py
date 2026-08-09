@@ -70,7 +70,26 @@ def main() -> None:
             raise AssertionError("Packaged design form does not disable native step-grid blocking")
         if not page.locator("#runButton").is_enabled():
             raise AssertionError("Optimization button is disabled before submission")
+        if page.locator("#optimizationMode").input_value() != "coupled":
+            raise AssertionError("Coupled optimization is not the default workflow")
 
+        page.locator("#optimizationMode").select_option("foil_only")
+        if "Profil optimizasyonunu" not in page.locator("#runButton").inner_text():
+            raise AssertionError("Foil-only mode did not update the run action")
+        page.evaluate(
+            """() => localStorage.setItem('aeropt.savedAirfoil.v1', JSON.stringify({
+                name: 'Smoke-Foil', family: 'CST6', created_at: new Date().toISOString(),
+                dat: 'Smoke-Foil\\n1.000000 0.000000\\n0.000000 0.000000\\n1.000000 0.000000\\n'
+            }))"""
+        )
+        page.locator("#optimizationMode").select_option("wing_only")
+        page.locator("#wingAirfoilSource").select_option("saved")
+        if "Kanat optimizasyonunu" not in page.locator("#runButton").inner_text():
+            raise AssertionError("Wing-only mode did not update the run action")
+
+        page.locator("#targetLift").fill("140000")
+        if not page.locator("#targetLift").evaluate("input => input.checkValidity()"):
+            raise AssertionError("Target lift still rejects an ordinary engineering value")
         page.locator("#runButton").click()
         page.locator("#errorState:not(.hidden)").wait_for(timeout=10_000)
         error_text = page.locator("#errorMessage").inner_text()
@@ -80,8 +99,16 @@ def main() -> None:
             raise AssertionError(f"Expected one form submission, got {len(submitted_payloads)}")
 
         payload = submitted_payloads[0]
+        if payload.get("workflow", {}).get("mode") != "wing_only":
+            raise AssertionError("Separated workflow mode was not serialized")
+        if payload.get("airfoil", {}).get("baseline_profile") != "custom_dat":
+            raise AssertionError("Saved optimized foil was not selected for wing-only mode")
+        if "Smoke-Foil" not in payload.get("airfoil", {}).get("baseline_dat", ""):
+            raise AssertionError("Saved optimized foil DAT was not serialized")
         if payload.get("flow", {}).get("speed_m_s") != 18:
             raise AssertionError("Default flow values were not serialized correctly")
+        if payload.get("flow", {}).get("target_lift_n") != 140000:
+            raise AssertionError("Arbitrary target lift was not serialized correctly")
         if payload.get("solver", {}).get("airfoil_strategy") != "flow5_native":
             raise AssertionError("Default flow5-native solver selection was not serialized")
         if payload.get("solver", {}).get("flow5_threads") != 16:
