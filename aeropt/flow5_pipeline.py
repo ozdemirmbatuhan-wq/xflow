@@ -24,7 +24,11 @@ from .exporters import (
     xfoil_polar_csv,
 )
 from .flow5 import Flow5Mesh, Flow5Runner
-from .flow5_optimization import optimize_airfoil_with_flow5, optimize_wing_with_flow5
+from .flow5_optimization import (
+    evaluate_fixed_airfoil_with_flow5,
+    optimize_airfoil_with_flow5,
+    optimize_wing_with_flow5,
+)
 from .hydro import HydroSettings
 from .models import CSTAirfoilDesign, Fluid, WingGeometry
 from .structures import StructuralSettings
@@ -429,6 +433,7 @@ def _native_insights(
 def run_flow5_native_design(
     *,
     request: dict[str, Any],
+    workflow_mode: str = "coupled",
     fluid: Fluid,
     fluid_key: str,
     reference_speed_m_s: float,
@@ -452,6 +457,14 @@ def run_flow5_native_design(
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
+    if workflow_mode not in {"coupled", "foil_only", "wing_only"}:
+        raise ValueError("Geçersiz flow5 çalışma modu")
+    effective_coupled_iterations = (
+        1 if workflow_mode in {"foil_only", "wing_only"} else settings.coupled_iterations
+    )
+    effective_spanwise_optimization = bool(
+        settings.spanwise_airfoil_optimization_enabled and workflow_mode == "coupled"
+    )
     stage_ranges = {
         "foil_search": (0.01, 0.35),
         "foil_budget": (0.01, 0.35),
@@ -463,8 +476,8 @@ def run_flow5_native_design(
     }
 
     active_iteration = 0
-    progress_passes = settings.coupled_iterations + int(
-        settings.spanwise_airfoil_optimization_enabled
+    progress_passes = effective_coupled_iterations + int(
+        effective_spanwise_optimization
     )
     last_reported_percent = 0.0
 
@@ -579,28 +592,20 @@ def run_flow5_native_design(
             },
         )
 
-    iteration_profile = settings.baseline_profile
-    iteration_reference_chord = reference_chord_m
-    iteration_target_cls = list(target_cls)
-    iteration_results: list[dict[str, Any]] = []
-    previous_objective: float | None = None
-    coupled_converged = settings.coupled_iterations == 1
-    for iteration in range(settings.coupled_iterations):
-        active_iteration = iteration
-        iteration_seed = settings.seed + 1009 * iteration
+    if workflow_mode == "foil_only":
         foil, foil_response, foil_meta, selected_foil_dat_text = optimize_airfoil_with_flow5(
             runner=runner,
-            baseline_profile=iteration_profile,
+            baseline_profile=settings.baseline_profile,
             fluid=fluid,
             speeds_m_s=speeds,
-            target_cls=iteration_target_cls,
-            reference_chord_m=iteration_reference_chord,
+            target_cls=target_cls,
+            reference_chord_m=reference_chord_m,
             camber_bounds=camber_bounds,
             camber_position_bounds=camber_position_bounds,
             thickness_bounds=thickness_bounds,
             alpha_bounds=alpha_bounds,
             candidate_budget=settings.foil_candidate_budget,
-            seed=iteration_seed,
+            seed=settings.seed,
             total_threads=settings.threads,
             cst_order=settings.cst_order,
             coordinate_points=settings.foil_coordinate_points,
@@ -617,18 +622,250 @@ def run_flow5_native_design(
             budget_escalation_settings=settings.budget_escalation_settings,
             checkpoint_store=checkpoint_store,
             checkpoint_key=checkpoint_key(
-                f"foil-coupled-{iteration + 1}",
+                "foil-only",
                 {
-                    "iteration_seed": iteration_seed,
-                    "reference_chord_m": iteration_reference_chord,
-                    "target_cls": iteration_target_cls,
-                    "baseline_identifier": iteration_profile.identifier,
+                    "reference_chord_m": reference_chord_m,
+                    "target_cls": target_cls,
+                    "baseline_identifier": settings.baseline_profile.identifier,
                     "baseline_dat_sha256": hashlib.sha256(
-                        iteration_profile.solver_dat_text.encode("utf-8")
+                        settings.baseline_profile.solver_dat_text.encode("utf-8")
                     ).hexdigest(),
                 },
             ),
         )
+        reference_polar = min(
+            foil_response["polars"],
+            key=lambda polar: abs(polar["speed_m_s"] - reference_speed_m_s),
+        )
+        reference_condition = min(
+            foil_meta["conditions"],
+            key=lambda item: abs(item["speed_m_s"] - reference_speed_m_s),
+        )
+        if foil_meta["selection"]["selected_baseline"]:
+            x = np.asarray(settings.baseline_profile.solver_x, dtype=float)
+            y = np.asarray(settings.baseline_profile.solver_y, dtype=float)
+        else:
+            x, y = airfoil_coordinates(
+                foil, total_points=settings.foil_coordinate_points
+            )
+        selected_improvement = foil_meta.get("selection", {}).get(
+            "selected_improvement_vs_baseline_percent"
+        )
+        result: dict[str, Any] = {
+            "status": (
+                "review"
+                if foil_meta.get("budget_convergence", {}).get("converged") is False
+                else "feasible"
+            ),
+            "workflow_mode": "foil_only",
+            "flow5_native": True,
+            "model": {
+                "airfoil": (
+                    f"{settings.baseline_profile.display_name} baseline + "
+                    f"CST{settings.cst_order}/Kulfan; every objective value from "
+                    "flow5 embedded XFoil"
+                ),
+                "wing": "Kanat aşaması kullanıcı seçimiyle atlandı",
+                "scope": "flow5 multi-point 2D preliminary airfoil design",
+            },
+            "solver_run": {
+                "strategy_requested": "flow5_native",
+                "strategy_used": "flow5_native",
+                "workflow_mode": "foil_only",
+                "aerodynamic_score_source": "flow5 only",
+                "flow5_threads": settings.threads,
+                "speed_samples": speed_samples,
+                "foil_candidate_budget": settings.foil_candidate_budget,
+                "foil_coordinate_points": settings.foil_coordinate_points,
+                "baseline_airfoil": settings.baseline_profile.identifier,
+                "cst_order": settings.cst_order,
+                "foil_optimizer": settings.foil_optimizer,
+                "wing_optimizer": "skipped",
+                "foil_budget_convergence": foil_meta.get("budget_convergence", {}),
+                "evaluation_cache": runner.cache_stats(),
+                "optimizer_checkpoint": checkpoint_store.stats(),
+                "surrogate": {"foil": foil_meta.get("surrogate", {})},
+                "solver": foil_meta.get("solver", {}),
+            },
+            "flow": {
+                **fluid.to_dict(),
+                "speed_m_s": reference_speed_m_s,
+                "speed_min_m_s": speed_bounds_m_s[0],
+                "speed_max_m_s": speed_bounds_m_s[1],
+                "speed_samples": speed_samples,
+                "sampled_speeds_m_s": speeds,
+                "target_lift_n": target_lift_n,
+                "dynamic_pressure_pa": fluid.dynamic_pressure(reference_speed_m_s),
+                "mach": fluid.mach(reference_speed_m_s),
+            },
+            "airfoil": foil.to_dict(),
+            "baseline_airfoil": foil_meta["baseline"],
+            "airfoil_optimization": {
+                **foil_meta,
+                "design_cl_was_auto": design_cl_was_auto,
+                "design_cl_at_reference": design_cl_at_reference,
+                "target_cls": target_cls,
+                "reynolds": reference_polar["reynolds"],
+                "mach": reference_polar["mach"],
+                "target_cl": reference_condition["target_cl"],
+                "design_alpha_deg": reference_condition["point"]["alpha_deg"],
+                "design_point": reference_condition["point"],
+                "final_cruise_point": reference_condition["point"],
+                "cl_max_estimate": reference_condition["cl_max_converged"],
+            },
+            "airfoil_coordinates": [
+                {"x_over_c": float(xi), "y_over_c": float(yi)}
+                for xi, yi in zip(x, y)
+            ],
+            "polar": reference_polar["points"],
+            "foil_polars": foil_response["polars"],
+            "polar_source": "flow5 embedded XFoil",
+            "coupled_design": {
+                "enabled": False,
+                "iterations_requested": 0,
+                "iterations_completed": 0,
+                "history": [],
+            },
+            "spanwise_airfoil_optimization": {"enabled": False, "performed": False},
+            "flow5_native_analysis": {
+                "foil_solver": "flow5::XFoilTask",
+                "foil_coordinate_points": settings.foil_coordinate_points,
+                "foil_conditions": foil_meta["conditions"],
+                "solver": foil_meta.get("solver", {}),
+                "evaluation_cache": runner.cache_stats(),
+                "optimizer_checkpoint": checkpoint_store.stats(),
+                "surrogate": {"foil": foil_meta.get("surrogate", {})},
+            },
+            "insights": [
+                {
+                    "level": "good",
+                    "title": "Profil optimizasyonu tamamlandı",
+                    "text": (
+                        f"{len(speeds)} akış noktasında seçilen profil doğrulandı; "
+                        f"referans noktada CL={float(reference_condition['point']['cl']):.4f}, "
+                        f"CD={float(reference_condition['point']['cd']):.5f}."
+                    ),
+                },
+                {
+                    "level": "info",
+                    "title": "Kanat aşaması çalıştırılmadı",
+                    "text": (
+                        "Profil DAT dosyası kaydedildi. Arayüzde Yalnız kanat modunu "
+                        "seçerek bu profille planform optimizasyonuna devam edebilirsiniz."
+                    ),
+                },
+                {
+                    "level": "good" if (selected_improvement or 0.0) > 0.0 else "info",
+                    "title": "Baseline karşılaştırması tamamlandı",
+                    "text": (
+                        f"Seçilen profilin çok-noktalı amaç farkı baseline'a göre "
+                        f"%{float(selected_improvement or 0.0):.2f}."
+                    ),
+                },
+            ],
+        }
+        polar_text = xfoil_polar_csv(reference_polar["points"])
+        snapshot = deepcopy(result)
+        project_text = project_json(request, snapshot)
+        result["exports"] = {
+            "airfoil_filename": f"{foil.name}.dat",
+            "airfoil_dat": selected_foil_dat_text,
+            "project_filename": "aeropt-foil-project.json",
+            "project_json": project_text,
+            "xfoil_polar_filename": "flow5-xfoil-polar.csv",
+            "xfoil_polar_csv": polar_text,
+        }
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "stage": "completed",
+                    "current": 1,
+                    "total": 1,
+                    "fraction": 1.0,
+                    "percent": 100.0,
+                    "message": "Profil optimizasyonu tamamlandı; kanat aşaması atlandı",
+                }
+            )
+        return result
+
+    iteration_profile = settings.baseline_profile
+    iteration_reference_chord = reference_chord_m
+    iteration_target_cls = list(target_cls)
+    iteration_results: list[dict[str, Any]] = []
+    previous_objective: float | None = None
+    coupled_converged = effective_coupled_iterations == 1
+    for iteration in range(effective_coupled_iterations):
+        active_iteration = iteration
+        iteration_seed = settings.seed + 1009 * iteration
+        if workflow_mode == "wing_only":
+            foil, foil_response, foil_meta, selected_foil_dat_text = (
+                evaluate_fixed_airfoil_with_flow5(
+                    runner=runner,
+                    baseline_profile=iteration_profile,
+                    fluid=fluid,
+                    speeds_m_s=speeds,
+                    target_cls=iteration_target_cls,
+                    reference_chord_m=iteration_reference_chord,
+                    alpha_bounds=alpha_bounds,
+                    total_threads=settings.threads,
+                    coordinate_points=settings.foil_coordinate_points,
+                    alpha_step_final_deg=settings.alpha_step_final_deg,
+                    ncrit=settings.ncrit,
+                    xtr_top=settings.xtr_top,
+                    xtr_bottom=settings.xtr_bottom,
+                )
+            )
+            report(
+                {
+                    "stage": "foil_final",
+                    "current": 1,
+                    "total": 1,
+                    "fraction": 1.0,
+                    "message": "Seçilen profil doğrulandı; geometri değiştirilmedi",
+                }
+            )
+        else:
+            foil, foil_response, foil_meta, selected_foil_dat_text = optimize_airfoil_with_flow5(
+                runner=runner,
+                baseline_profile=iteration_profile,
+                fluid=fluid,
+                speeds_m_s=speeds,
+                target_cls=iteration_target_cls,
+                reference_chord_m=iteration_reference_chord,
+                camber_bounds=camber_bounds,
+                camber_position_bounds=camber_position_bounds,
+                thickness_bounds=thickness_bounds,
+                alpha_bounds=alpha_bounds,
+                candidate_budget=settings.foil_candidate_budget,
+                seed=iteration_seed,
+                total_threads=settings.threads,
+                cst_order=settings.cst_order,
+                coordinate_points=settings.foil_coordinate_points,
+                minimum_improvement_percent=settings.foil_minimum_improvement_percent,
+                alpha_step_search_deg=settings.alpha_step_search_deg,
+                alpha_step_final_deg=settings.alpha_step_final_deg,
+                ncrit=settings.ncrit,
+                xtr_top=settings.xtr_top,
+                xtr_bottom=settings.xtr_bottom,
+                progress_callback=report,
+                cancel_event=cancel_event,
+                optimizer=settings.foil_optimizer,
+                surrogate_settings=settings.surrogate_settings,
+                budget_escalation_settings=settings.budget_escalation_settings,
+                checkpoint_store=checkpoint_store,
+                checkpoint_key=checkpoint_key(
+                    f"foil-coupled-{iteration + 1}",
+                    {
+                        "iteration_seed": iteration_seed,
+                        "reference_chord_m": iteration_reference_chord,
+                        "target_cls": iteration_target_cls,
+                        "baseline_identifier": iteration_profile.identifier,
+                        "baseline_dat_sha256": hashlib.sha256(
+                            iteration_profile.solver_dat_text.encode("utf-8")
+                        ).hexdigest(),
+                    },
+                ),
+            )
         wing, baseline, wing_meta, wing_response = optimize_wing_with_flow5(
             runner=runner,
             foil=foil,
@@ -745,7 +982,7 @@ def run_flow5_native_design(
         ):
             coupled_converged = True
             break
-        if iteration + 1 >= settings.coupled_iterations:
+        if iteration + 1 >= effective_coupled_iterations:
             break
         previous_objective = objective
         iteration_reference_chord = updated_chord
@@ -801,14 +1038,14 @@ def run_flow5_native_design(
     ] | None = None
     section_foil_dat_texts: tuple[str, str, str] | None = None
     spanwise_airfoil_meta: dict[str, Any] = {
-        "enabled": settings.spanwise_airfoil_optimization_enabled,
+        "enabled": effective_spanwise_optimization,
         "performed": False,
         "selected": False,
         "station_count": 1,
         "profiles": [{"station": "root", "name": foil.name, "eta": 0.0}],
     }
-    if settings.spanwise_airfoil_optimization_enabled:
-        active_iteration = settings.coupled_iterations
+    if effective_spanwise_optimization:
+        active_iteration = effective_coupled_iterations
         station_budget = max(
             8,
             int(round(settings.foil_candidate_budget * settings.spanwise_foil_budget_fraction)),
@@ -1019,16 +1256,21 @@ def run_flow5_native_design(
         "status": (
             "feasible"
             if wing_meta["feasible"]
-            and (settings.coupled_iterations <= 1 or coupled_converged)
+            and (effective_coupled_iterations <= 1 or coupled_converged)
             and foil_meta.get("budget_convergence", {}).get("converged") is not False
             and wing_meta.get("budget_convergence", {}).get("converged") is not False
             else "review"
         ),
+        "workflow_mode": workflow_mode,
         "flow5_native": True,
         "model": {
             "airfoil": (
-                f"{baseline_profile.display_name} baseline + CST{settings.cst_order}/Kulfan geometry; "
-                "every objective value from flow5 embedded XFoil"
+                (
+                    f"{baseline_profile.display_name} fixed DAT geometry; flow5 embedded XFoil validation"
+                    if workflow_mode == "wing_only"
+                    else f"{baseline_profile.display_name} baseline + CST{settings.cst_order}/Kulfan geometry; "
+                    "every objective value from flow5 embedded XFoil"
+                )
             ),
             "wing": f"flow5 {wing_meta['search_method']} search + {wing_meta['final_method']} final; viscous on-the-fly",
             "scope": "flow5 potential-flow preliminary design over multiple operating points",
@@ -1051,9 +1293,14 @@ def run_flow5_native_design(
             "final_method": settings.final_method.upper(),
             "mesh_convergence_enabled": settings.mesh_convergence_enabled,
             "output_mesh": wing_meta["output_mesh"],
-            "foil_optimizer": settings.foil_optimizer,
+            "foil_optimizer": (
+                "skipped_fixed_airfoil"
+                if workflow_mode == "wing_only"
+                else settings.foil_optimizer
+            ),
             "wing_optimizer": settings.wing_optimizer,
-            "coupled_iterations_requested": settings.coupled_iterations,
+            "workflow_mode": workflow_mode,
+            "coupled_iterations_requested": effective_coupled_iterations,
             "coupled_iterations_completed": len(coupling_history),
             "selected_coupled_iteration": int(selected_iteration["iteration"]),
             "solver": wing_meta.get("solver", {}),
@@ -1109,9 +1356,9 @@ def run_flow5_native_design(
             {"enabled": False, "performed": False, "passed": True},
         ),
         "coupled_design": {
-            "enabled": settings.coupled_iterations > 1,
+            "enabled": effective_coupled_iterations > 1,
             "converged": bool(coupled_converged),
-            "iterations_requested": settings.coupled_iterations,
+            "iterations_requested": effective_coupled_iterations,
             "iterations_completed": len(coupling_history),
             "selected_iteration": int(selected_iteration["iteration"]),
             "cl_tolerance_percent": settings.coupling_cl_tolerance_percent,
