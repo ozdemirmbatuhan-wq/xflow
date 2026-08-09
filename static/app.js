@@ -477,7 +477,10 @@ function renderXfoil(result) {
       row("Foil optimizeri", result.solver_run.foil_optimizer || "differential_evolution"),
       row("Kanat optimizeri", result.solver_run.wing_optimizer || "differential_evolution"),
       row("Kanat amaçları", multiObjective.enabled ? `${(multiObjective.objective_specs || []).length} amaç · Pareto rank + crowding` : "skaler amaç"),
-      row("Bağlı foil–kanat", `${coupled.iterations_completed || 1} iterasyon · seçilen ${coupled.selected_iteration || 1}`),
+      row(
+        "Bağlı foil–kanat",
+        `${coupled.iterations_completed || 1}/${coupled.iterations_requested || 1} tur · final ${coupled.selected_iteration || 1}${coupled.converged ? " · yakınsadı" : ""}`,
+      ),
       row("Spanwise profil", spanwise.selected ? "kök / orta / uç" : "tek profil"),
       row("Foil çözücüsü", analysis.foil_solver), row("Akış noktası", String(result.flow.speed_samples)),
       row("CST foil adayı", String(result.airfoil_optimization.candidates_evaluated)),
