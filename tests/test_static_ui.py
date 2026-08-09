@@ -50,6 +50,16 @@ class StaticUiContractTests(unittest.TestCase):
         self.assertIn('aeropt.savedAirfoil.v1', javascript)
         self.assertIn('result.workflow_mode === "foil_only"', javascript)
 
+    def test_coupled_round_control_explains_cl_and_re_feedback(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        control = re.search(
+            r'<input\b[^>]*id="flow5CoupledIterations"[^>]*>', html
+        )
+        self.assertIsNotNone(control)
+        self.assertIn('min="1"', control.group(0))
+        self.assertIn('max="8"', control.group(0))
+        self.assertIn("kanadın gerçek kesit C<sub>L</sub> dağılımı ve MAC/Re", html)
+
     def test_design_form_uses_application_validation(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
         javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
