@@ -92,6 +92,8 @@ def _sample_speeds(
     bounds_m_s: tuple[float, float], reference_speed_m_s: float, count: int
 ) -> list[float]:
     """Return an endpoint-inclusive mesh which always contains the reference speed."""
+    if np.isclose(bounds_m_s[0], bounds_m_s[1], rtol=0.0, atol=1e-10):
+        return [float(reference_speed_m_s)]
     values = np.linspace(*bounds_m_s, count)
     if not np.any(np.isclose(values, reference_speed_m_s, rtol=0.0, atol=1e-10)):
         internal = np.arange(1, count - 1)
@@ -512,7 +514,9 @@ def run_flow5_native_design(
                 "message": "flow5 çalışma koşulları hazırlanıyor",
             }
         )
+    requested_speed_samples = int(speed_samples)
     speeds = _sample_speeds(speed_bounds_m_s, reference_speed_m_s, speed_samples)
+    speed_samples = len(speeds)
     target_cls = [
         float(design_cl_at_reference * (reference_speed_m_s / speed) ** 2) for speed in speeds
     ]
@@ -676,6 +680,7 @@ def run_flow5_native_design(
                 "aerodynamic_score_source": "flow5 only",
                 "flow5_threads": settings.threads,
                 "speed_samples": speed_samples,
+                "speed_samples_requested": requested_speed_samples,
                 "foil_candidate_budget": settings.foil_candidate_budget,
                 "foil_coordinate_points": settings.foil_coordinate_points,
                 "baseline_airfoil": settings.baseline_profile.identifier,
@@ -694,6 +699,7 @@ def run_flow5_native_design(
                 "speed_min_m_s": speed_bounds_m_s[0],
                 "speed_max_m_s": speed_bounds_m_s[1],
                 "speed_samples": speed_samples,
+                "speed_samples_requested": requested_speed_samples,
                 "sampled_speeds_m_s": speeds,
                 "target_lift_n": target_lift_n,
                 "dynamic_pressure_pa": fluid.dynamic_pressure(reference_speed_m_s),
@@ -1324,6 +1330,7 @@ def run_flow5_native_design(
             "aerodynamic_score_source": "flow5 only",
             "flow5_threads": settings.threads,
             "speed_samples": speed_samples,
+            "speed_samples_requested": requested_speed_samples,
             "foil_candidate_budget": settings.foil_candidate_budget,
             "foil_coordinate_points": settings.foil_coordinate_points,
             "baseline_airfoil": settings.baseline_profile.identifier,
@@ -1362,6 +1369,7 @@ def run_flow5_native_design(
             "speed_min_m_s": speed_bounds_m_s[0],
             "speed_max_m_s": speed_bounds_m_s[1],
             "speed_samples": speed_samples,
+            "speed_samples_requested": requested_speed_samples,
             "sampled_speeds_m_s": speeds,
             "target_lift_n": target_lift_n,
             "dynamic_pressure_pa": fluid.dynamic_pressure(reference_speed_m_s),
