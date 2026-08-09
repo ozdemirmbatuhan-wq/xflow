@@ -33,15 +33,9 @@ function Is-WindowsSystemDll([string]$Name) {
     return (Test-Path (Join-Path $env:SystemRoot "System32\$Name"))
 }
 
-function Is-WinDeployQtDependency([string]$Name) {
-    $lower = $Name.ToLowerInvariant()
-    return ($lower -match '^qt6.*\.dll$')
-}
-
-# windeployqt can deploy vc_redist.x64.exe instead of the individual MSVC
-# runtime DLLs. AeroOpt is distributed as a portable ZIP, so collect the
-# redistributable x64 DLLs from the active MSVC toolchain and place only the
-# runtime files that the dependency graph actually needs beside the runner.
+# AeroOpt is distributed as a portable ZIP, so collect the redistributable x64
+# MSVC DLLs from the active toolchain and place only the runtime files that the
+# dependency graph actually needs beside the runner.
 $msvcRedistCandidates = @()
 if (-not [string]::IsNullOrWhiteSpace($env:VCToolsRedistDir)) {
     $msvcRedistCandidates += (Join-Path $env:VCToolsRedistDir "x64")
@@ -95,6 +89,17 @@ if ($LASTEXITCODE -ne 0 -or $msvcpHeaders -notmatch '(?i)8664 machine \(x64\)') 
     throw "The located MSVCP140.dll is not a valid x64 runtime DLL: $($msvcp140.FullName)"
 }
 
+# The flow5 runner is a headless QCoreApplication and links only Qt6Core. It
+# does not need GUI platform plugins, translations or QML deployment. Index the
+# active Qt bin directory directly so the same dependency-closure pass can
+# collect Qt6Core.dll and its MSVC runtime dependencies without windeployqt.
+$qmake = (Get-Command qmake -ErrorAction Stop).Source
+$qtBin = Split-Path -Parent $qmake
+$qtCore = Join-Path $qtBin "Qt6Core.dll"
+if (-not (Test-Path $qtCore)) {
+    throw "Qt6Core.dll was not found beside qmake: $qtCore"
+}
+
 $searchRoots = @(
     (Join-Path $Flow5Source "XFoil-lib"),
     (Join-Path $Flow5Source "flow5-lib"),
@@ -102,6 +107,7 @@ $searchRoots = @(
     (Join-Path $OccRoot "win64\vc14\bin"),
     (Join-Path $GmshRoot "lib"),
     (Join-Path $OpenBlasRoot "bin"),
+    $qtBin,
     $ThirdPartyRoot
 ) + @(
     $msvcRedistRoots
@@ -157,7 +163,6 @@ function Copy-DependencyClosure([string[]]$Roots) {
                 continue
             }
             if (Is-WindowsSystemDll $dependency) { continue }
-            if (Is-WinDeployQtDependency $dependency) { continue }
 
             $sourceKey = $dependency.ToLowerInvariant()
             if (-not $dllIndex.ContainsKey($sourceKey)) {
@@ -174,20 +179,6 @@ function Copy-DependencyClosure([string[]]$Roots) {
 $runnerDestination = Join-Path $Destination "aeropt-flow5-runner.exe"
 Copy-Item -Force $Runner $runnerDestination
 Copy-DependencyClosure -Roots @($runnerDestination)
-
-$windeployqt = (Get-Command windeployqt).Source
-& $windeployqt --release --no-translations --no-compiler-runtime --dir $Destination `
-    $runnerDestination
-if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
-
-# windeployqt adds Qt libraries after the first dependency pass. Resolve the
-# closure again from every deployed binary so dependencies introduced by Qt
-# itself (for example MSVCP140_1.dll) are collected before validation.
-$deployedBinaries = @($runnerDestination) + @(
-    Get-ChildItem -Path $Destination -Recurse -File -Filter "*.dll" |
-        ForEach-Object { $_.FullName }
-)
-Copy-DependencyClosure -Roots $deployedBinaries
 
 # Validate the complete packaged dependency graph. Only Windows system DLLs
 # may remain outside the destination.
