@@ -598,6 +598,123 @@ def _foil_score(
     return robust_drag + penalty / max(len(conditions), 1), conditions
 
 
+def evaluate_fixed_airfoil_with_flow5(
+    *,
+    runner: Flow5Runner,
+    baseline_profile: BaselineProfile,
+    fluid: Fluid,
+    speeds_m_s: list[float],
+    target_cls: list[float],
+    reference_chord_m: float,
+    alpha_bounds: tuple[float, float],
+    total_threads: int,
+    coordinate_points: int,
+    alpha_step_final_deg: float,
+    ncrit: float,
+    xtr_top: float,
+    xtr_bottom: float,
+) -> tuple[CSTAirfoilDesign, dict[str, Any], dict[str, Any], str]:
+    """Analyze an imported DAT once without changing its geometry."""
+    foil = baseline_profile.foil
+    threads = max(1, min(int(total_threads), len(speeds_m_s)))
+    response = runner.analyze_foil(
+        foil=foil,
+        fluid=fluid,
+        speeds_m_s=speeds_m_s,
+        reference_chord_m=reference_chord_m,
+        alpha_min_deg=alpha_bounds[0],
+        alpha_max_deg=alpha_bounds[1],
+        alpha_step_deg=alpha_step_final_deg,
+        max_threads=threads,
+        coordinate_points=coordinate_points,
+        foil_dat_text=baseline_profile.solver_dat_text,
+        ncrit=ncrit,
+        xtr_top=xtr_top,
+        xtr_bottom=xtr_bottom,
+    )
+    score, conditions = _foil_score(response, target_cls, alpha_bounds)
+    if not math.isfinite(score) or not conditions:
+        raise RuntimeError(
+            "Seçilen profil flow5/XFoil ile hedef CL aralığında doğrulanamadı"
+        )
+    budget_report = {
+        "enabled": False,
+        "converged": None,
+        "status": "not_applicable",
+        "base_budget": 0,
+        "maximum_budget": 0,
+        "evaluations_completed": 1,
+        "milestones": [],
+        "checkpoints": [],
+    }
+    metadata = {
+        "success": True,
+        "source": "flow5 embedded XFoil only",
+        "optimizer": "skipped_fixed_airfoil",
+        "objective": float(score),
+        "candidate_budget": 0,
+        "maximum_candidate_budget": 0,
+        "candidates_evaluated": 1,
+        "budget_convergence": budget_report,
+        "valid_candidates": 1,
+        "outer_parallel_runners": 1,
+        "threads_per_runner": threads,
+        "total_threads_requested": int(total_threads),
+        "detected_logical_cores": os.cpu_count() or 1,
+        "surrogate": {"enabled": False, "reason": "sabit profil"},
+        "checkpoint": {"enabled": False, "resumed": False},
+        "reference_chord_m": float(reference_chord_m),
+        "cst_order": int(baseline_profile.cst_order),
+        "solver_coordinate_points": int(coordinate_points),
+        "conditions": conditions,
+        "baseline": {
+            **baseline_profile.to_dict(),
+            "within_design_envelope": True,
+            "solver_geometry": "source DAT cosine-resampled to 100 points",
+            "search_converged": True,
+            "search_score": float(score),
+            "final_score": float(score),
+            "selected": True,
+            "error": None,
+        },
+        "selection": {
+            "mode": "fixed_import",
+            "selected_name": foil.name,
+            "selected_family": foil.family,
+            "selected_baseline": True,
+            "minimum_improvement_percent": 0.0,
+            "raw_best_improvement_vs_baseline_percent": 0.0,
+            "selected_improvement_vs_baseline_percent": 0.0,
+            "baseline_retained_by_threshold": False,
+            "finalists_evaluated": 1,
+        },
+        "finalists": [
+            {
+                "name": foil.name,
+                "score": float(score),
+                "is_baseline": True,
+                "within_design_envelope": True,
+                "selected": True,
+                "error": None,
+            }
+        ],
+        "top_candidates": [
+            {
+                "rank": 1,
+                "name": foil.name,
+                "family": foil.family,
+                "is_baseline": True,
+                "score": float(score),
+                "thickness": float(foil.thickness),
+                "max_camber": float(foil.max_camber),
+                "error": None,
+            }
+        ],
+        "solver": response.get("solver", {}),
+    }
+    return foil, response, metadata, baseline_profile.solver_dat_text
+
+
 def optimize_airfoil_with_flow5(
     *,
     runner: Flow5Runner,
