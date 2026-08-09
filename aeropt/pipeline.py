@@ -36,6 +36,9 @@ from .reliability import build_multi_seed_report, refresh_flow5_exports
 
 
 DEFAULT_REQUEST: dict[str, Any] = {
+    "workflow": {
+        "mode": "coupled",
+    },
     "flow": {
         "fluid": "air",
         "density_kg_m3": 1.225,
@@ -328,6 +331,7 @@ def run_design(
     if not isinstance(payload, dict):
         raise InputError("İstek bir JSON nesnesi olmalı")
     request = _merge_defaults(payload)
+    workflow_cfg = _section(request, "workflow")
     flow = _section(request, "flow")
     airfoil_cfg = _section(request, "airfoil")
     wing_cfg = _section(request, "wing")
@@ -500,6 +504,9 @@ def run_design(
         solver_cfg, "xfoil_cd_tolerance_percent", minimum=0.1, maximum=200.0
     )
     requested_strategy = str(solver_cfg.get("airfoil_strategy", "auto"))
+    workflow_mode = str(workflow_cfg.get("mode", "coupled")).strip().lower()
+    if workflow_mode not in {"coupled", "foil_only", "wing_only"}:
+        raise InputError("Çalışma modu coupled, foil_only veya wing_only olmalı")
     allowed_strategies = {
         "flow5_native",
         "auto",
@@ -519,6 +526,8 @@ def run_design(
         raise InputError("XFOIL kapalı döngüsü için XFOIL çalıştırılabilir dosya yolunu girin")
     if strategy.startswith("xfoil_") and not Path(xfoil_path).expanduser().is_file():
         raise InputError(f"XFOIL çalıştırılabilir dosyası bulunamadı: {xfoil_path}")
+    if workflow_mode != "coupled" and strategy != "flow5_native":
+        raise InputError("Ayrık profil/kanat çalışma modları yalnız flow5-native zincirinde kullanılabilir")
 
     flow5_runner_path = str(solver_cfg.get("flow5_runner_path", "")).strip()
     flow5_threads = int(_number(solver_cfg, "flow5_threads", minimum=1.0, maximum=64.0))
@@ -876,6 +885,7 @@ def run_design(
             validation_settings=validation_settings,
         )
         native_kwargs = {
+            "workflow_mode": workflow_mode,
             "fluid": fluid,
             "fluid_key": fluid_key,
             "reference_speed_m_s": speed,
@@ -897,6 +907,23 @@ def run_design(
             "max_root_bending_moment_nm": max_bending,
             "cancel_event": cancel_event,
         }
+        if workflow_mode == "foil_only":
+            foil_result = run_flow5_native_design(
+                request=request,
+                settings=replace(settings, multi_seed_runs=1),
+                progress_callback=progress_callback,
+                **native_kwargs,
+            )
+            foil_result["multi_seed_stability"] = {
+                "enabled": False,
+                "runs_requested": 1,
+                "runs_completed": 1,
+                "selected_seed": settings.seed,
+                "stable": None,
+                "status": "not_applicable",
+                "runs": [],
+            }
+            return foil_result
         seed_records: list[dict[str, Any]] = []
         for run_index in range(settings.multi_seed_runs):
             run_seed = settings.seed + run_index * settings.multi_seed_stride
