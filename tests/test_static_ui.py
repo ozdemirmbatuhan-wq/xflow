@@ -70,6 +70,13 @@ class StaticUiContractTests(unittest.TestCase):
         self.assertIn('if (input.min !== "")', javascript)
         self.assertIn('if (input.max !== "")', javascript)
 
+    def test_single_reference_speed_point_is_selectable(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        control = re.search(r'<input\b[^>]*id="speedSamples"[^>]*>', html)
+        self.assertIsNotNone(control)
+        self.assertIn('min="1"', control.group(0))
+        self.assertIn("1 = yalnız referans", html)
+
     def test_number_inputs_accept_free_continuous_values_or_plain_integers(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
         number_inputs = re.findall(r'<input\b[^>]*type="number"[^>]*>', html)
