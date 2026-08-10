@@ -91,11 +91,17 @@ class Flow5NativeSettings:
 def _sample_speeds(
     bounds_m_s: tuple[float, float], reference_speed_m_s: float, count: int
 ) -> list[float]:
-    """Return an endpoint-inclusive mesh which always contains the reference speed."""
+    """Return the reference alone for one point, otherwise an endpoint mesh."""
+    if count <= 0:
+        raise ValueError("speed sample count must be positive")
+    if count == 1:
+        return [float(reference_speed_m_s)]
     if np.isclose(bounds_m_s[0], bounds_m_s[1], rtol=0.0, atol=1e-10):
         return [float(reference_speed_m_s)]
     values = np.linspace(*bounds_m_s, count)
-    if not np.any(np.isclose(values, reference_speed_m_s, rtol=0.0, atol=1e-10)):
+    if count >= 3 and not np.any(
+        np.isclose(values, reference_speed_m_s, rtol=0.0, atol=1e-10)
+    ):
         internal = np.arange(1, count - 1)
         replace = int(internal[np.argmin(np.abs(values[internal] - reference_speed_m_s))])
         values[replace] = reference_speed_m_s

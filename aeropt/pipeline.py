@@ -344,7 +344,7 @@ def run_design(
     fluid_key = str(flow.get("fluid", "custom"))
     speed = _number(flow, "speed_m_s", minimum=0.05)
     speed_bounds = _bounds(flow, "speed_min_m_s", "speed_max_m_s", minimum=0.05)
-    speed_samples_value = _number(flow, "speed_samples", minimum=3.0, maximum=9.0)
+    speed_samples_value = _number(flow, "speed_samples", minimum=1.0, maximum=9.0)
     if not float(speed_samples_value).is_integer():
         raise InputError("'speed_samples' tam sayı olmalı")
     speed_samples = int(speed_samples_value)
