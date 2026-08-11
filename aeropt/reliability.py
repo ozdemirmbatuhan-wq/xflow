@@ -38,7 +38,17 @@ def build_multi_seed_report(
         ]
     )
     objective_cv = float(100.0 * np.std(objectives) / max(abs(float(np.mean(objectives))), 1e-12))
-    geometry_keys = ("span", "root_chord", "taper", "sweep_deg", "tip_twist_deg")
+    geometry_keys = (
+        "span",
+        "root_chord",
+        "taper",
+        "sweep_deg",
+        "tip_twist_deg",
+        "winglet_height",
+        "winglet_cant_deg",
+        "winglet_toe_deg",
+        "winglet_taper",
+    )
     geometry_cv: dict[str, float] = {}
     geometry_scales: dict[str, float] = {}
     for key in geometry_keys:
@@ -128,6 +138,11 @@ def refresh_flow5_exports(result: dict[str, Any], request: dict[str, Any]) -> No
             result.get("diagnostic_report", {}), ensure_ascii=False, indent=2, allow_nan=False
         ),
     }
+    hydro = result.get("hydro_analysis", {})
+    if isinstance(hydro, dict) and hydro.get("enabled"):
+        reports["aeropt-cavitation.json"] = json.dumps(
+            hydro, ensure_ascii=False, indent=2, allow_nan=False
+        )
     exports["project_json"] = project_text
     exports["validation_filename"] = "aeropt-validation.json"
     exports["validation_json"] = reports["aeropt-validation.json"]
@@ -137,6 +152,12 @@ def refresh_flow5_exports(result: dict[str, Any], request: dict[str, Any]) -> No
     exports["pareto_json"] = reports["aeropt-pareto.json"]
     exports["diagnostics_filename"] = "aeropt-diagnostics.json"
     exports["diagnostics_json"] = reports["aeropt-diagnostics.json"]
+    if "aeropt-cavitation.json" in reports:
+        exports["cavitation_filename"] = "aeropt-cavitation.json"
+        exports["cavitation_json"] = reports["aeropt-cavitation.json"]
+    else:
+        exports.pop("cavitation_filename", None)
+        exports.pop("cavitation_json", None)
     encoded = exports.get("flow5_bundle_base64")
     if not encoded:
         return

@@ -45,7 +45,7 @@ def _regression_signature(result: dict[str, Any]) -> str:
     wing = result["wing"]
     geometry = wing["geometry"]
     payload = {
-        "contract": 1,
+        "contract": 2,
         "solver": result.get("flow5_native_analysis", {}).get("solver", {}),
         "airfoil": {
             key: round(float(result["airfoil"][key]), 7)
@@ -53,7 +53,18 @@ def _regression_signature(result: dict[str, Any]) -> str:
         },
         "wing": {
             key: round(float(geometry[key]), 7)
-            for key in ("span", "root_chord", "taper", "sweep_deg", "tip_twist_deg", "area")
+            for key in (
+                "span",
+                "root_chord",
+                "taper",
+                "sweep_deg",
+                "tip_twist_deg",
+                "winglet_height",
+                "winglet_cant_deg",
+                "winglet_toe_deg",
+                "winglet_taper",
+                "area",
+            )
         },
         "performance": {
             key: round(float(wing[key]), 8)

@@ -139,7 +139,7 @@ def wing_constraint_violation(
                 for key in ("stress_utilization", "deflection_utilization", "twist_utilization")
             )
     hydro = candidate.hydro or {}
-    if hydro.get("enabled"):
+    if hydro.get("enabled") and hydro.get("constraint_mode", "hard") == "hard":
         if not hydro.get("performed"):
             violation += 2.0
         else:
@@ -338,7 +338,9 @@ def _wing_tradeoff_summary(
         and not item.get("point", {}).get("out_of_mesh", False)
         and item.get("point", {}).get("viscous_converged", True)
         for item in candidate.conditions
-    ) and bool(structure.get("passed", True)) and bool(hydro.get("passed", True))
+    ) and bool(structure.get("passed", True)) and bool(
+        hydro.get("constraint_passed", hydro.get("passed", True))
+    )
     return {
         "id": identifier,
         "selected": bool(selected),
@@ -358,6 +360,9 @@ def _wing_tradeoff_summary(
         ),
         "maximum_structural_utilization": structural_utilization,
         "cavitation_utilization": cavitation_utilization,
+        "cavitation_constraint_active": bool(
+            hydro.get("enabled") and hydro.get("constraint_mode", "hard") == "hard"
+        ),
         "geometry": candidate.geometry.to_dict(),
     }
 
@@ -393,7 +398,7 @@ def build_pareto_analysis(
             item.get("estimated_material_mass_kg") is not None for item in summaries
         ),
         hydro_enabled=any(
-            item.get("cavitation_utilization") is not None for item in summaries
+            item.get("cavitation_constraint_active") for item in summaries
         ),
     )
 
@@ -1398,14 +1403,40 @@ def _wing_conditions(
                 "ld": float(target_lift_n / drag_n),
                 "point": point,
                 "method": case["method"],
+                **(
+                    {"panel_telemetry": case["panel_telemetry"]}
+                    if isinstance(case.get("panel_telemetry"), dict)
+                    else {}
+                ),
             }
         )
     robust_drag = float(np.mean(drag_ratios) + 0.45 * np.max(drag_ratios))
     return robust_drag + penalty / max(len(conditions), 1), conditions
 
 
-def _vector_to_geometry(vector: Iterable[float]) -> WingGeometry:
+def _vector_to_geometry(
+    vector: Iterable[float],
+    *,
+    multi_section: bool = False,
+    winglet_enabled: bool = False,
+) -> WingGeometry:
     values = list(vector)
+    cursor = 5
+    mid_chord_factor = 1.0
+    mid_twist_deg: float | None = None
+    if multi_section:
+        mid_chord_factor = float(values[cursor])
+        mid_twist_deg = float(values[cursor + 1])
+        cursor += 2
+    winglet_height = 0.0
+    winglet_cant_deg = 90.0
+    winglet_toe_deg = 0.0
+    winglet_taper = 1.0
+    if winglet_enabled:
+        winglet_height = float(values[cursor])
+        winglet_cant_deg = float(values[cursor + 1])
+        winglet_toe_deg = float(values[cursor + 2])
+        winglet_taper = float(values[cursor + 3])
     return WingGeometry(
         span=float(values[0]),
         root_chord=float(values[1]),
@@ -1413,12 +1444,19 @@ def _vector_to_geometry(vector: Iterable[float]) -> WingGeometry:
         sweep_deg=float(values[3]),
         tip_twist_deg=float(values[4]),
         alpha_deg=0.0,
-        mid_chord_factor=float(values[5]) if len(values) > 5 else 1.0,
-        mid_twist_deg=float(values[6]) if len(values) > 6 else None,
+        mid_chord_factor=mid_chord_factor,
+        mid_twist_deg=mid_twist_deg,
+        winglet_enabled=bool(winglet_enabled),
+        winglet_height=winglet_height,
+        winglet_cant_deg=winglet_cant_deg,
+        winglet_toe_deg=winglet_toe_deg,
+        winglet_taper=winglet_taper,
     )
 
 
-def _geometry_to_vector(geometry: WingGeometry, multi_section: bool) -> np.ndarray:
+def _geometry_to_vector(
+    geometry: WingGeometry, multi_section: bool, winglet_enabled: bool = False
+) -> np.ndarray:
     values = [
         geometry.span,
         geometry.root_chord,
@@ -1428,6 +1466,15 @@ def _geometry_to_vector(geometry: WingGeometry, multi_section: bool) -> np.ndarr
     ]
     if multi_section:
         values.extend([geometry.mid_chord_factor, geometry.effective_mid_twist_deg])
+    if winglet_enabled:
+        values.extend(
+            [
+                geometry.winglet_height,
+                geometry.winglet_cant_deg,
+                geometry.winglet_toe_deg,
+                geometry.winglet_taper,
+            ]
+        )
     return np.asarray(values, dtype=float)
 
 
@@ -1531,6 +1578,11 @@ def optimize_wing_with_flow5(
     multi_section_geometry_enabled: bool = False,
     mid_chord_factor_bounds: tuple[float, float] = (0.8, 1.2),
     mid_twist_bounds: tuple[float, float] | None = None,
+    winglet_optimization_enabled: bool = False,
+    winglet_height_bounds: tuple[float, float] = (0.05, 0.40),
+    winglet_cant_bounds: tuple[float, float] = (60.0, 90.0),
+    winglet_toe_bounds: tuple[float, float] = (-3.0, 3.0),
+    winglet_taper_bounds: tuple[float, float] = (0.30, 1.0),
     section_foils: tuple[CSTAirfoilDesign, CSTAirfoilDesign, CSTAirfoilDesign] | None = None,
     section_foil_dat_texts: tuple[str, str, str] | None = None,
     structural_settings: StructuralSettings = StructuralSettings(),
@@ -1556,8 +1608,37 @@ def optimize_wing_with_flow5(
     ]
     if multi_section_geometry_enabled:
         bounds_list.extend([mid_chord_factor_bounds, mid_twist_bounds or twist_bounds])
+    if winglet_optimization_enabled:
+        bounds_list.extend(
+            [
+                winglet_height_bounds,
+                winglet_cant_bounds,
+                winglet_toe_bounds,
+                winglet_taper_bounds,
+            ]
+        )
+        if min(
+            search_mesh.half_span_panels,
+            final_mesh.half_span_panels,
+            convergence_mesh.half_span_panels,
+        ) < 6:
+            raise ValueError("Winglet çözümü için yarı açıklık panel sayısı en az 6 olmalı")
     bounds = np.asarray(bounds_list, dtype=float)
     candidates: list[WingCandidate] = []
+
+    def geometry_from_vector(vector: Iterable[float]) -> WingGeometry:
+        return _vector_to_geometry(
+            vector,
+            multi_section=multi_section_geometry_enabled,
+            winglet_enabled=winglet_optimization_enabled,
+        )
+
+    def vector_from_geometry(geometry: WingGeometry) -> np.ndarray:
+        return _geometry_to_vector(
+            geometry,
+            multi_section_geometry_enabled,
+            winglet_optimization_enabled,
+        )
 
     def evaluate(
         geometry: WingGeometry,
@@ -1567,6 +1648,11 @@ def optimize_wing_with_flow5(
         mesh: Flow5Mesh,
     ) -> WingCandidate:
         _check_cancelled(cancel_event)
+        if not geometry.winglet_geometry_valid:
+            return WingCandidate(
+                geometry,
+                error="Winglet yatay izdüşümü ana yarı açıklık için yer bırakmıyor",
+            )
         try:
             response = runner.analyze_wing(
                 foil=foil,
@@ -1584,6 +1670,10 @@ def optimize_wing_with_flow5(
                 xtr_top=xtr_top,
                 xtr_bottom=xtr_bottom,
                 save_project=save,
+                panel_telemetry=bool(save and hydro_settings.enabled),
+                panel_telemetry_target_lift_n=(
+                    target_lift_n if save and hydro_settings.enabled else None
+                ),
                 mesh=mesh,
                 section_foils=section_foils,
                 section_foil_dat_texts=section_foil_dat_texts,
@@ -1635,7 +1725,7 @@ def optimize_wing_with_flow5(
     dimension = bounds.shape[0]
     objective_specs = wing_objective_specs(
         structural_enabled=structural_settings.enabled,
-        hydro_enabled=hydro_settings.enabled,
+        hydro_enabled=hydro_settings.optimization_active,
     )
     objective_keys = [item["key"] for item in objective_specs]
     search_evaluations = 0
@@ -1738,7 +1828,7 @@ def optimize_wing_with_flow5(
         vectors = bounds[:, 0] + unit_population * (bounds[:, 1] - bounds[:, 0])
         vectors[0] = (
             np.clip(
-                _geometry_to_vector(initial_geometry, multi_section_geometry_enabled),
+                vector_from_geometry(initial_geometry),
                 bounds[:, 0],
                 bounds[:, 1],
             )
@@ -1799,7 +1889,7 @@ def optimize_wing_with_flow5(
                 for raw_vector in restored["population_vectors"]:
                     population.append(
                         evaluate(
-                            _vector_to_geometry(np.asarray(raw_vector, dtype=float)),
+                            geometry_from_vector(np.asarray(raw_vector, dtype=float)),
                             search_method,
                             alpha_step_search_deg,
                             False,
@@ -1843,9 +1933,7 @@ def optimize_wing_with_flow5(
                     "generation": generation,
                     "evaluations_completed": search_evaluations,
                     "population_vectors": [
-                        _geometry_to_vector(
-                            item.geometry, multi_section_geometry_enabled
-                        ).tolist()
+                        vector_from_geometry(item.geometry).tolist()
                         for item in population
                     ],
                     "rng_state": rng.bit_generator.state,
@@ -1860,7 +1948,7 @@ def optimize_wing_with_flow5(
             for vector in latin_hypercube(population_size):
                 _check_cancelled(cancel_event)
                 candidate = evaluate(
-                    _vector_to_geometry(vector),
+                    geometry_from_vector(vector),
                     search_method,
                     alpha_step_search_deg,
                     False,
@@ -1891,9 +1979,8 @@ def optimize_wing_with_flow5(
                 for target_index in range(len(population)):
                     if not budget_controller.should_evaluate(search_evaluations):
                         break
-                    target_vector = _geometry_to_vector(
-                        population[target_index].geometry,
-                        multi_section_geometry_enabled,
+                    target_vector = vector_from_geometry(
+                        population[target_index].geometry
                     )
                     proposal_vectors: list[np.ndarray] = []
                     proposal_count = (
@@ -1907,10 +1994,7 @@ def optimize_wing_with_flow5(
                         ]
                         a_index, b_index, c_index = rng.choice(choices, size=3, replace=False)
                         source_vectors = [
-                            _geometry_to_vector(
-                                population[int(index)].geometry,
-                                multi_section_geometry_enabled,
-                            )
+                            vector_from_geometry(population[int(index)].geometry)
                             for index in (a_index, b_index, c_index)
                         ]
                         mutant = source_vectors[0] + float(rng.uniform(0.55, 0.90)) * (
@@ -1927,7 +2011,7 @@ def optimize_wing_with_flow5(
                         )
                     trial_vector = proposal_vectors[advisor.choose(proposal_vectors)]
                     trial = evaluate(
-                        _vector_to_geometry(trial_vector),
+                        geometry_from_vector(trial_vector),
                         search_method,
                         alpha_step_search_deg,
                         False,
@@ -1975,6 +2059,9 @@ def optimize_wing_with_flow5(
                     for variable in np.flatnonzero(mask):
                         eta_mutation = 20.0
                         lower, upper = bounds[variable]
+                        if span[variable] <= 1.0e-15:
+                            child[variable] = lower
+                            continue
                         value = float(np.clip(child[variable], lower, upper))
                         delta_lower = (value - lower) / span[variable]
                         delta_upper = (upper - value) / span[variable]
@@ -2019,19 +2106,17 @@ def optimize_wing_with_flow5(
                 )
                 offspring_vectors: list[np.ndarray] = []
                 while len(offspring_vectors) < remaining:
-                    left = _geometry_to_vector(
-                        population[tournament_index(ranks, crowding)].geometry,
-                        multi_section_geometry_enabled,
+                    left = vector_from_geometry(
+                        population[tournament_index(ranks, crowding)].geometry
                     )
-                    right = _geometry_to_vector(
-                        population[tournament_index(ranks, crowding)].geometry,
-                        multi_section_geometry_enabled,
+                    right = vector_from_geometry(
+                        population[tournament_index(ranks, crowding)].geometry
                     )
                     offspring_vectors.extend(sbx_children(left, right))
                 offspring: list[WingCandidate] = []
                 for vector in offspring_vectors[:remaining]:
                     candidate = evaluate(
-                        _vector_to_geometry(vector),
+                        geometry_from_vector(vector),
                         search_method,
                         alpha_step_search_deg,
                         False,
@@ -2071,7 +2156,7 @@ def optimize_wing_with_flow5(
     else:
         queue: list[np.ndarray] = [
             np.clip(
-                _geometry_to_vector(initial_geometry, multi_section_geometry_enabled),
+                vector_from_geometry(initial_geometry),
                 bounds[:, 0],
                 bounds[:, 1],
             )
@@ -2092,9 +2177,8 @@ def optimize_wing_with_flow5(
             if queue:
                 vector = queue.pop(0)
             elif elites and rng.random() < 0.76:
-                parent = _geometry_to_vector(
-                    elites[int(rng.integers(0, len(elites)))].geometry,
-                    multi_section_geometry_enabled,
+                parent = vector_from_geometry(
+                    elites[int(rng.integers(0, len(elites)))].geometry
                 )
                 scale = (0.20 * (1.0 - progress) + 0.035 * progress) * (
                     bounds[:, 1] - bounds[:, 0]
@@ -2106,7 +2190,7 @@ def optimize_wing_with_flow5(
                 vector = rng.uniform(bounds[:, 0], bounds[:, 1])
             record_candidate(
                 evaluate(
-                    _vector_to_geometry(vector),
+                    geometry_from_vector(vector),
                     search_method,
                     alpha_step_search_deg,
                     False,
@@ -2260,6 +2344,11 @@ def optimize_wing_with_flow5(
             alpha,
             candidate.geometry.mid_chord_factor,
             candidate.geometry.mid_twist_deg,
+            candidate.geometry.winglet_enabled,
+            candidate.geometry.winglet_height,
+            candidate.geometry.winglet_cant_deg,
+            candidate.geometry.winglet_toe_deg,
+            candidate.geometry.winglet_taper,
         )
         cd_total = float(point["cd"])
         cd_profile = float(point.get("cdv", 0.0))
@@ -2280,6 +2369,9 @@ def optimize_wing_with_flow5(
             "drag_n": float(condition["drag_n"]),
             "ld": float(condition["ld"]),
             "span_efficiency": float(efficiency),
+            "induced_drag_fraction_percent": float(
+                100.0 * cd_induced / max(cd_total, 1.0e-12)
+            ),
             "root_bending_moment_nm": float(point.get("root_bending_moment_nm", 0.0)),
             "stall_ratio": float(condition["stall_ratio"]),
             "reynolds_root": fluid.reynolds(reference_speed_m_s, geometry.root_chord),
@@ -2309,7 +2401,10 @@ def optimize_wing_with_flow5(
     ) and bool(convergence["passed"]) and bool(
         (optimum.structural or {}).get("passed", not structural_settings.enabled)
     ) and bool(
-        (optimum.hydro or {}).get("passed", not hydro_settings.enabled)
+        (optimum.hydro or {}).get(
+            "constraint_passed",
+            (optimum.hydro or {}).get("passed", not hydro_settings.enabled),
+        )
     )
     if checkpoint_store is not None and checkpoint_key:
         checkpoint_store.clear(checkpoint_key)
@@ -2361,14 +2456,29 @@ def optimize_wing_with_flow5(
             "cp_min_available": all(
                 item["point"].get("cp_min") is not None for item in optimum.conditions or []
             ),
+            "panel_map_available": bool(
+                (optimum.hydro or {}).get("panel_map_available", False)
+            ),
         },
         "mesh_convergence": convergence,
         "search_mesh": search_mesh.to_dict(),
         "final_mesh": final_mesh.to_dict(),
         "output_mesh": output_mesh.to_dict(),
         "multi_section_geometry_enabled": bool(multi_section_geometry_enabled),
-        "section_count": 3,
+        "section_count": 4 if winglet_optimization_enabled else 3,
         "independent_mid_geometry_variables": bool(multi_section_geometry_enabled),
+        "winglet_optimization_enabled": bool(winglet_optimization_enabled),
+        "winglet_geometry_model": (
+            "flow5 high-dihedral fourth section; zero quarter-chord winglet sweep"
+            if winglet_optimization_enabled
+            else "disabled"
+        ),
+        "winglet_bounds": {
+            "height_m": list(winglet_height_bounds),
+            "cant_deg": list(winglet_cant_bounds),
+            "toe_deg": list(winglet_toe_bounds),
+            "taper": list(winglet_taper_bounds),
+        },
         "spanwise_airfoil_count": 3 if section_foils is not None else 1,
         "spanwise_airfoil_names": (
             [section_foil.name for section_foil in section_foils]

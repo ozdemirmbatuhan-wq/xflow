@@ -122,13 +122,19 @@ def build_diagnostic_report(
     induced_share = float(wing.get("cd_induced", 0.0)) / max(cd_total, 1e-12)
     profile_share = float(wing.get("cd_profile", 0.0)) / max(cd_total, 1e-12)
     if induced_share > 0.58:
+        winglet = result.get("winglet_comparison", {})
+        recommendation = (
+            "Planar/winglet karşılaştırmasını inceleyin; ardından açıklık, taper ve twist sınırlarını kontrollü genişletin."
+            if winglet.get("performed")
+            else "Açıklık sınırlıysa winglet karşılaştırmasını açın; ayrıca taper–twist yük dağılımını genişletmeyi değerlendirin."
+        )
         diagnoses.append(
             _entry(
                 "induced_drag_dominant",
                 "info",
                 "İndüklenmiş sürükleme baskın",
                 f"CDi/toplam CD payı %{100.0 * induced_share:.1f}.",
-                "Açıklık/alan sınırlarını ve taper–twist yük dağılımını genişletmeyi değerlendirin.",
+                recommendation,
             )
         )
     if profile_share > 0.68:
@@ -172,7 +178,13 @@ def build_diagnostic_report(
         ("taper", "Taper"),
         ("sweep_deg", "Sweep"),
         ("tip_twist_deg", "Uç twist"),
+        ("winglet_height", "Winglet yüksekliği"),
+        ("winglet_cant_deg", "Winglet cant"),
+        ("winglet_toe_deg", "Winglet toe"),
+        ("winglet_taper", "Winglet taper"),
     ):
+        if key.startswith("winglet_") and not geometry.get("winglet_enabled", False):
+            continue
         bound = bounds.get(key)
         if not bound:
             continue
@@ -253,13 +265,26 @@ def build_diagnostic_report(
         )
     hydro = result.get("hydro_analysis", {})
     if hydro.get("enabled") and not hydro.get("passed"):
+        report_only = hydro.get("constraint_mode") == "report_only"
         diagnoses.append(
             _entry(
                 "cavitation_limit",
-                "critical",
-                "Kavitasyon marjı yetersiz",
-                f"Kavitasyon kullanımı {float(hydro.get('cavitation_utilization', 0.0)):.3f}.",
-                "Hızı/yüklemeyi düşürün, batma derinliğini veya profil basınç dağılımını değiştirin.",
+                "warning" if report_only else "critical",
+                (
+                    "Kavitasyon riski raporlandı"
+                    if report_only
+                    else "Kavitasyon marjı yetersiz"
+                ),
+                (
+                    f"Kavitasyon kullanımı {float(hydro.get('cavitation_utilization', 0.0)):.3f}; "
+                    f"riskli finalist alanı %{float(hydro.get('risk_area_percent', 0.0)):.2f}."
+                ),
+                (
+                    "Bu koşu yalnız rapor modunda; L/D seçimi değiştirilmedi. "
+                    "Hız, batma derinliği ve profil basınç dağılımını haritadan inceleyin."
+                    if report_only
+                    else "Hızı/yüklemeyi düşürün, batma derinliğini veya profil basınç dağılımını değiştirin."
+                ),
             )
         )
     if float(wing.get("ld", 0.0)) < 15.0 and not diagnoses:

@@ -23,6 +23,21 @@ def airfoil_dat(foil: AirfoilLike, total_points: int = 100) -> str:
     return "\n".join(rows) + "\n"
 
 
+def _allocate_span_panels(lengths: tuple[float, ...], total: int) -> tuple[int, ...]:
+    """Allocate an exact panel total while keeping two panels per surface strip."""
+    if total < 2 * len(lengths):
+        raise ValueError(
+            f"Bu geometri için yarı açıklıkta en az {2 * len(lengths)} panel gerekli"
+        )
+    positive = np.maximum(np.asarray(lengths, dtype=float), 1.0e-12)
+    remaining = int(total) - 2 * len(lengths)
+    raw = remaining * positive / float(np.sum(positive))
+    extra = np.floor(raw).astype(int)
+    for index in np.argsort(-(raw - extra))[: remaining - int(np.sum(extra))]:
+        extra[index] += 1
+    return tuple(int(value) for value in extra + 2)
+
+
 def flow5_plane_xml(
     foil: AirfoilLike,
     wing: WingGeometry,
@@ -31,7 +46,7 @@ def flow5_plane_xml(
     half_span_panels: int = 18,
     section_foils: tuple[AirfoilLike, AirfoilLike, AirfoilLike] | None = None,
 ) -> str:
-    """Create a flow5 xflplane XML with root, mid and tip wing sections."""
+    """Create a flow5 plane XML with an optional high-dihedral winglet strip."""
     if not 4 <= int(chordwise_panels) <= 200:
         raise ValueError("Kord yönündeki panel sayısı 4 ile 200 arasında olmalı")
     if not 4 <= int(half_span_panels) <= 400:
@@ -63,37 +78,83 @@ def flow5_plane_xml(
     ET.SubElement(wing_node, "Two_Sided").text = "true"
     sections = ET.SubElement(wing_node, "Sections")
     foils = section_foils or (foil, foil, foil)
-    first_panels = max(2, int(round(half_span_panels * wing.mid_span_fraction)))
-    second_panels = int(half_span_panels) - first_panels
-    if second_panels < 2:
-        second_panels = 2
-        first_panels = int(half_span_panels) - second_panels
-    section_data = (
-        (0.0, wing.root_chord, 0.0, 0.0, first_panels, foils[0].name),
-        (
-            0.5 * wing.span * wing.mid_span_fraction,
-            wing.mid_chord,
-            wing.mid_le_offset,
-            wing.effective_mid_twist_deg,
-            second_panels,
-            foils[1].name,
-        ),
-        (
-            0.5 * wing.span,
-            wing.tip_chord,
-            wing.tip_le_offset,
-            wing.tip_twist_deg,
-            0,
-            foils[2].name,
-        ),
-    )
-    for y_pos, chord, offset, twist, y_panels, foil_name in section_data:
+    if wing.winglet_active:
+        if not wing.winglet_geometry_valid:
+            raise ValueError("Winglet yatay izdüşümü ana yarı açıklığı tüketiyor")
+        strip_panels = _allocate_span_panels(
+            (
+                wing.main_semispan * wing.mid_span_fraction,
+                wing.main_semispan * (1.0 - wing.mid_span_fraction),
+                wing.winglet_developed_length,
+            ),
+            int(half_span_panels),
+        )
+        section_data = (
+            (0.0, wing.root_chord, 0.0, 0.0, 0.0, strip_panels[0], foils[0].name),
+            (
+                wing.main_semispan * wing.mid_span_fraction,
+                wing.mid_chord,
+                wing.mid_le_offset,
+                0.0,
+                wing.effective_mid_twist_deg,
+                strip_panels[1],
+                foils[1].name,
+            ),
+            (
+                wing.main_semispan,
+                wing.winglet_root_chord,
+                wing.tip_le_offset,
+                wing.winglet_cant_deg,
+                wing.tip_twist_deg,
+                strip_panels[2],
+                foils[2].name,
+            ),
+            (
+                wing.main_semispan + wing.winglet_developed_length,
+                wing.winglet_tip_chord,
+                wing.winglet_tip_le_offset,
+                0.0,
+                wing.winglet_tip_twist_deg,
+                0,
+                foils[2].name,
+            ),
+        )
+    else:
+        strip_panels = _allocate_span_panels(
+            (
+                wing.main_semispan * wing.mid_span_fraction,
+                wing.main_semispan * (1.0 - wing.mid_span_fraction),
+            ),
+            int(half_span_panels),
+        )
+        section_data = (
+            (0.0, wing.root_chord, 0.0, 0.0, 0.0, strip_panels[0], foils[0].name),
+            (
+                wing.main_semispan * wing.mid_span_fraction,
+                wing.mid_chord,
+                wing.mid_le_offset,
+                0.0,
+                wing.effective_mid_twist_deg,
+                strip_panels[1],
+                foils[1].name,
+            ),
+            (
+                wing.main_semispan,
+                wing.tip_chord,
+                wing.tip_le_offset,
+                0.0,
+                wing.tip_twist_deg,
+                0,
+                foils[2].name,
+            ),
+        )
+    for y_pos, chord, offset, dihedral, twist, y_panels, foil_name in section_data:
         section = ET.SubElement(sections, "Section")
         values = (
             ("y_position", f"{y_pos:.8g}"),
             ("Chord", f"{chord:.8g}"),
             ("xOffset", f"{offset:.8g}"),
-            ("Dihedral", "0"),
+            ("Dihedral", f"{dihedral:.8g}"),
             ("Twist", f"{twist:.8g}"),
             ("x_number_of_panels", str(int(chordwise_panels))),
             ("x_panel_distribution", "COSINE"),
@@ -192,6 +253,17 @@ def results_csv(foil: AirfoilLike, result: WingResult) -> str:
         ("performance", "root_bending_moment", result.root_bending_moment_nm, "N m"),
         ("performance", "stall_ratio", result.stall_ratio, "-"),
     ]
+    if result.geometry.winglet_active:
+        rows.extend(
+            [
+                ("winglet", "height", result.geometry.winglet_height, "m"),
+                ("winglet", "cant", result.geometry.winglet_cant_deg, "deg"),
+                ("winglet", "toe", result.geometry.winglet_toe_deg, "deg"),
+                ("winglet", "taper", result.geometry.winglet_taper, "-"),
+                ("winglet", "tip_chord", result.geometry.winglet_tip_chord, "m"),
+                ("winglet", "surface_area", result.geometry.winglet_surface_area, "m2"),
+            ]
+        )
     writer.writerows(rows)
     return output.getvalue()
 
@@ -233,6 +305,17 @@ def flow5_native_results_csv(foil: AirfoilLike, result: dict) -> str:
         ("performance", "L_over_D", result["ld"], "-", "flow5"),
         ("performance", "root_bending_moment", result["root_bending_moment_nm"], "N m", "flow5"),
     ]
+    if geometry.get("winglet_active"):
+        rows.extend(
+            [
+                ("winglet", "height", geometry["winglet_height"], "m", "geometry"),
+                ("winglet", "cant", geometry["winglet_cant_deg"], "deg", "geometry"),
+                ("winglet", "toe", geometry["winglet_toe_deg"], "deg", "geometry"),
+                ("winglet", "taper", geometry["winglet_taper"], "-", "geometry"),
+                ("winglet", "tip_chord", geometry["winglet_tip_chord"], "m", "geometry"),
+                ("winglet", "surface_area", geometry["winglet_surface_area"], "m2", "geometry"),
+            ]
+        )
     structure = result.get("structural", {})
     if structure.get("enabled"):
         rows.extend(
@@ -249,8 +332,12 @@ def flow5_native_results_csv(foil: AirfoilLike, result: dict) -> str:
         rows.extend(
             [
                 ("hydro", "cavitation_passed", hydro.get("passed", False), "-", "flow5 Cp_min screen"),
+                ("hydro", "constraint_mode", hydro.get("constraint_mode", "hard"), "-", "selection policy"),
                 ("hydro", "cavitation_utilization", hydro.get("cavitation_utilization", ""), "-", "flow5 Cp_min screen"),
                 ("hydro", "minimum_cavitation_margin", hydro.get("minimum_cavitation_margin_ratio", ""), "-", "flow5 Cp_min screen"),
+                ("hydro", "risk_area_percent", hydro.get("risk_area_percent", ""), "%", "flow5 finalist panel map"),
+                ("hydro", "physical_onset_area_percent", hydro.get("physical_onset_area_percent", ""), "%", "flow5 finalist panel map"),
+                ("hydro", "cavitation_severity_index", hydro.get("cavitation_severity_index", ""), "-", "area-weighted panel screen"),
                 ("hydro", "free_surface_risk", hydro.get("free_surface_risk", ""), "-", "Froude/depth screen"),
             ]
         )
@@ -270,7 +357,7 @@ def wing_obj(
     points_per_side: int = 81,
     section_foils: tuple[AirfoilLike, AirfoilLike, AirfoilLike] | None = None,
 ) -> str:
-    """Create a watertight-enough 3D preview/import mesh using the optimized planform."""
+    """Create a connected 3D mesh of the planar wing and optional winglets."""
     if span_sections < 3:
         raise ValueError("OBJ için en az üç açıklık istasyonu gerekli")
     foil_sections = section_foils or (foil, foil, foil)
@@ -282,30 +369,116 @@ def wing_obj(
             contour_z = contour_z[:-1]
         contours.append((contour_x, contour_z))
     section_size = len(contours[0][0])
-    stations = np.linspace(-0.5 * wing.span, 0.5 * wing.span, span_sections)
-    rows = ["# AeroOpt optimized wing", f"o {foil.name}-wing"]
-    for y_pos in stations:
-        fraction = abs(2.0 * y_pos / wing.span)
-        chord = wing.chord_at(fraction)
-        x_offset = wing.le_offset_at(fraction)
-        twist = radians(wing.twist_at(fraction))
-        if fraction <= 0.5:
-            blend = 2.0 * fraction
-            first, second = contours[0], contours[1]
+
+    main_half_count = max(3, (span_sections + 1) // 2)
+    positive_stations: list[tuple[str, float]] = [
+        ("main", float(value)) for value in np.linspace(0.0, 1.0, main_half_count)
+    ]
+    if wing.winglet_active:
+        winglet_count = max(
+            3,
+            int(
+                round(
+                    (main_half_count - 1)
+                    * wing.winglet_developed_length
+                    / max(wing.main_semispan, 1.0e-9)
+                )
+            )
+            + 1,
+        )
+        positive_stations.extend(
+            ("winglet", float(value))
+            for value in np.linspace(0.0, 1.0, winglet_count)[1:]
+        )
+    stations: list[tuple[int, str, float]] = [
+        (-1, kind, fraction)
+        for kind, fraction in reversed(positive_stations[1:])
+    ]
+    stations.append((1, "main", 0.0))
+    stations.extend((1, kind, fraction) for kind, fraction in positive_stations[1:])
+
+    def station_data(
+        side: int, kind: str, fraction: float
+    ) -> tuple[
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        tuple[np.ndarray, np.ndarray],
+    ]:
+        if kind == "main":
+            chord = wing.chord_at(fraction)
+            x_offset = wing.le_offset_at(fraction)
+            twist = radians(wing.twist_at(fraction))
+            y_center = side * fraction * wing.main_semispan
+            z_center = 0.0
+            normal_y = 0.0
+            normal_z = 1.0
+            if fraction <= 0.5:
+                blend = 2.0 * fraction
+                first, second = contours[0], contours[1]
+            else:
+                blend = 2.0 * (fraction - 0.5)
+                first, second = contours[1], contours[2]
+            contour = (
+                (1.0 - blend) * first[0] + blend * second[0],
+                (1.0 - blend) * first[1] + blend * second[1],
+            )
         else:
-            blend = 2.0 * (fraction - 0.5)
-            first, second = contours[1], contours[2]
-        contour_x = (1.0 - blend) * first[0] + blend * second[0]
-        contour_z = (1.0 - blend) * first[1] + blend * second[1]
+            cant = radians(wing.winglet_cant_deg)
+            distance = fraction * wing.winglet_developed_length
+            chord = wing.winglet_root_chord + fraction * (
+                wing.winglet_tip_chord - wing.winglet_root_chord
+            )
+            x_offset = wing.tip_le_offset + fraction * (
+                wing.winglet_tip_le_offset - wing.tip_le_offset
+            )
+            twist = radians(wing.tip_twist_deg + fraction * wing.winglet_toe_deg)
+            y_center = side * (
+                wing.main_semispan + distance * cos(cant)
+            )
+            z_center = distance * sin(cant)
+            normal_y = -side * sin(cant)
+            normal_z = cos(cant)
+            contour = contours[2]
+        return (
+            chord,
+            x_offset,
+            twist,
+            y_center,
+            z_center,
+            normal_y,
+            normal_z,
+            contour,
+        )
+
+    rows = ["# AeroOpt optimized wing", f"o {foil.name}-wing"]
+    for side, kind, fraction in stations:
+        (
+            chord,
+            x_offset,
+            twist,
+            y_center,
+            z_center,
+            normal_y,
+            normal_z,
+            contour,
+        ) = station_data(side, kind, fraction)
+        contour_x, contour_z = contour
         for x_over_c, z_over_c in zip(contour_x, contour_z):
             x_quarter = (x_over_c - 0.25) * chord
             z_local = z_over_c * chord
             x_rotated = x_quarter * cos(twist) + z_local * sin(twist)
-            z_rotated = -x_quarter * sin(twist) + z_local * cos(twist)
+            normal_offset = -x_quarter * sin(twist) + z_local * cos(twist)
             rows.append(
-                f"v {x_offset + 0.25 * chord + x_rotated:.8f} {y_pos:.8f} {z_rotated:.8f}"
+                f"v {x_offset + 0.25 * chord + x_rotated:.8f} "
+                f"{y_center + normal_y * normal_offset:.8f} "
+                f"{z_center + normal_z * normal_offset:.8f}"
             )
-    for station in range(span_sections - 1):
+    for station in range(len(stations) - 1):
         first = station * section_size + 1
         second = (station + 1) * section_size + 1
         for index in range(section_size):
@@ -314,7 +487,7 @@ def wing_obj(
                 f"f {first + index} {second + index} {second + following} {first + following}"
             )
     rows.append("f " + " ".join(str(index) for index in range(section_size, 0, -1)))
-    right_start = (span_sections - 1) * section_size + 1
+    right_start = (len(stations) - 1) * section_size + 1
     rows.append("f " + " ".join(str(right_start + index) for index in range(section_size)))
     return "\n".join(rows) + "\n"
 

@@ -197,6 +197,79 @@ def _normalize_points(points: Any, *, wing: bool) -> list[dict[str, Any]]:
     return normalized
 
 
+def _normalize_panel_telemetry(raw: Any) -> dict[str, Any] | None:
+    """Validate finalist-only flow5 panel geometry/Cp without inventing coordinates."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("panels"), list):
+        return None
+    panels: list[dict[str, Any]] = []
+    for index, source in enumerate(raw["panels"]):
+        if not isinstance(source, dict):
+            continue
+        try:
+            panel: dict[str, Any] = {
+                "panel_index": int(source.get("panel_index", index)),
+                "wing_index": int(source.get("wing_index", 0)),
+                "surface_index": int(source.get("surface_index", -1)),
+                "surface": str(source.get("surface", "unknown")),
+                "component": str(source.get("component", "main_wing")),
+                "side": str(source.get("side", "unknown")),
+                "x_m": _finite(source.get("x_m"), f"panels[{index}].x_m"),
+                "y_m": _finite(source.get("y_m"), f"panels[{index}].y_m"),
+                "z_m": _finite(source.get("z_m"), f"panels[{index}].z_m"),
+                "nx": _finite(source.get("nx", 0.0), f"panels[{index}].nx"),
+                "ny": _finite(source.get("ny", 0.0), f"panels[{index}].ny"),
+                "nz": _finite(source.get("nz", 0.0), f"panels[{index}].nz"),
+                "area_m2": _finite(
+                    source.get("area_m2"), f"panels[{index}].area_m2"
+                ),
+                "cp": _finite(source.get("cp"), f"panels[{index}].cp"),
+                "leading_edge_panel": bool(source.get("leading_edge_panel", False)),
+                "trailing_edge_panel": bool(source.get("trailing_edge_panel", False)),
+            }
+        except (Flow5RunnerError, TypeError, ValueError):
+            continue
+        if panel["area_m2"] <= 0.0:
+            continue
+        vertices: list[list[float]] = []
+        for vertex_index, vertex in enumerate(source.get("vertices", [])):
+            if not isinstance(vertex, list) or len(vertex) != 3:
+                continue
+            try:
+                vertices.append(
+                    [
+                        _finite(
+                            coordinate,
+                            f"panels[{index}].vertices[{vertex_index}]",
+                        )
+                        for coordinate in vertex
+                    ]
+                )
+            except Flow5RunnerError:
+                continue
+        if len(vertices) >= 3:
+            panel["vertices"] = vertices
+        panels.append(panel)
+    if not panels:
+        return None
+    normalized: dict[str, Any] = {
+        "panel_count": len(panels),
+        "panel_area_sum_m2": float(sum(panel["area_m2"] for panel in panels)),
+        "thin_surfaces": bool(raw.get("thin_surfaces", True)),
+        "upper_lower_resolved": bool(raw.get("upper_lower_resolved", False)),
+        "cp_definition": str(
+            raw.get("cp_definition", "flow5 panel pressure coefficient")
+        ),
+        "panels": panels,
+    }
+    for key in ("target_cl", "sampled_cl", "sampled_alpha_deg"):
+        if raw.get(key) is not None:
+            try:
+                normalized[key] = _finite(raw[key], f"panel_telemetry.{key}")
+            except Flow5RunnerError:
+                pass
+    return normalized
+
+
 class Flow5Runner:
     """Subprocess adapter for the small C++ runner shipped in ``flow5_bridge``.
 
@@ -499,6 +572,9 @@ class Flow5Runner:
         xtr_top: float = 1.0,
         xtr_bottom: float = 1.0,
         save_project: bool = False,
+        panel_telemetry: bool = False,
+        panel_telemetry_target_lift_n: float | None = None,
+        thin_surfaces: bool = True,
         mesh: Flow5Mesh | None = None,
         section_foils: tuple[AirfoilLike, AirfoilLike, AirfoilLike] | None = None,
         section_foil_dat_texts: tuple[str, str, str] | None = None,
@@ -510,6 +586,14 @@ class Flow5Runner:
         if (section_foils is None) != (section_foil_dat_texts is None):
             raise Flow5RunnerError(
                 "Kesit profilleri ve DAT metinleri birlikte verilmelidir"
+            )
+        if panel_telemetry and (
+            panel_telemetry_target_lift_n is None
+            or not math.isfinite(float(panel_telemetry_target_lift_n))
+            or float(panel_telemetry_target_lift_n) <= 0.0
+        ):
+            raise Flow5RunnerError(
+                "Panel telemetrisi için pozitif hedef taşıma kuvveti gerekli"
             )
         wing_files: dict[str, str]
         section_request: list[dict[str, str]] | None = None
@@ -554,6 +638,18 @@ class Flow5Runner:
                 "max_threads": int(max_threads),
                 "foil_coordinate_points": int(coordinate_points),
                 "save_project": bool(save_project),
+                "panel_telemetry": bool(panel_telemetry),
+                "winglet_active": bool(geometry.winglet_active),
+                "thin_surfaces": bool(thin_surfaces),
+                **(
+                    {
+                        "panel_telemetry_target_lift_n": float(
+                            panel_telemetry_target_lift_n
+                        )
+                    }
+                    if panel_telemetry
+                    else {}
+                ),
                 "mesh": mesh.to_dict(),
                 **({"section_foils": section_request} if section_request else {}),
             },
@@ -577,13 +673,17 @@ class Flow5Runner:
         for index, raw in enumerate(raw_cases):
             if not isinstance(raw, dict):
                 raise Flow5RunnerError("flow5 3B polar yanıtı geçersiz")
-            cases.append(
-                {
-                    "speed_m_s": _finite(raw.get("speed_m_s", speeds_m_s[index]), "speed_m_s"),
-                    "method": str(raw.get("method", method)).upper(),
-                    "points": _normalize_points(raw.get("points"), wing=True),
-                }
-            )
+            case = {
+                "speed_m_s": _finite(
+                    raw.get("speed_m_s", speeds_m_s[index]), "speed_m_s"
+                ),
+                "method": str(raw.get("method", method)).upper(),
+                "points": _normalize_points(raw.get("points"), wing=True),
+            }
+            telemetry = _normalize_panel_telemetry(raw.get("panel_telemetry"))
+            if telemetry is not None:
+                case["panel_telemetry"] = telemetry
+            cases.append(case)
         response["cases"] = sorted(cases, key=lambda case: case["speed_m_s"])
         raw_mesh = response.get("mesh")
         normalized_mesh = mesh.to_dict()

@@ -82,6 +82,15 @@ DEFAULT_REQUEST: dict[str, Any] = {
         "mid_chord_factor_max": 1.15,
         "mid_twist_min_deg": -4.0,
         "mid_twist_max_deg": 1.0,
+        "winglet_optimization_enabled": False,
+        "winglet_height_min_m": 0.05,
+        "winglet_height_max_m": 0.40,
+        "winglet_cant_min_deg": 60.0,
+        "winglet_cant_max_deg": 90.0,
+        "winglet_toe_min_deg": -3.0,
+        "winglet_toe_max_deg": 3.0,
+        "winglet_taper_min": 0.30,
+        "winglet_taper_max": 1.0,
     },
     "solver": {
         "quality": "balanced",
@@ -93,6 +102,7 @@ DEFAULT_REQUEST: dict[str, Any] = {
         "flow5_timeout_seconds": 900.0,
         "flow5_foil_candidate_budget": 48,
         "flow5_wing_candidate_budget": 48,
+        "flow5_winglet_candidate_budget": 48,
         "flow5_finalists": 3,
         "flow5_search_method": "VLM2",
         "flow5_final_method": "TRIUNIFORM",
@@ -161,6 +171,7 @@ DEFAULT_REQUEST: dict[str, Any] = {
     },
     "hydro": {
         "enabled": True,
+        "constraint_mode": "hard",
         "submergence_depth_m": 1.0,
         "ambient_pressure_pa": 101325.0,
         "vapor_pressure_pa": 1705.0,
@@ -218,6 +229,23 @@ def _merge_defaults(payload: dict[str, Any]) -> dict[str, Any]:
             merged[section].update(values)
         else:
             merged[section] = values
+    # A direct JSON caller may select a preset without echoing the three
+    # editable property fields that the browser always submits.  Do not leave
+    # the air defaults attached to a water preset in that case; explicit
+    # property overrides still win one by one.
+    flow_payload = payload.get("flow")
+    if isinstance(flow_payload, dict):
+        fluid_key = str(flow_payload.get("fluid", merged["flow"].get("fluid", "air")))
+        preset = FLUID_PRESETS.get(fluid_key)
+        if preset is not None:
+            preset_values = {
+                "density_kg_m3": preset.density,
+                "dynamic_viscosity_pa_s": preset.dynamic_viscosity,
+                "speed_of_sound_m_s": preset.speed_of_sound,
+            }
+            for key, value in preset_values.items():
+                if key not in flow_payload:
+                    merged["flow"][key] = value
     return merged
 
 
@@ -446,8 +474,16 @@ def run_design(
         ),
     )
     hydro_requested = _boolean(hydro_cfg, "enabled")
+    hydro_constraint_mode = str(
+        hydro_cfg.get("constraint_mode", "hard")
+    ).strip().lower()
+    if hydro_constraint_mode not in {"hard", "report_only"}:
+        raise InputError(
+            "'constraint_mode' yalnız 'hard' veya 'report_only' olabilir"
+        )
     hydro_settings = HydroSettings(
         enabled=bool(hydro_requested and fluid_key in {"fresh_water", "sea_water"}),
+        constraint_mode=hydro_constraint_mode,
         submergence_depth_m=_number(
             hydro_cfg, "submergence_depth_m", minimum=0.001, maximum=10000.0
         ),
@@ -483,6 +519,37 @@ def run_design(
         "mid_twist_max_deg",
         minimum=-12.0,
         maximum=8.0,
+    )
+    winglet_optimization_enabled = _boolean(
+        wing_cfg, "winglet_optimization_enabled"
+    )
+    winglet_height_bounds = _bounds(
+        wing_cfg,
+        "winglet_height_min_m",
+        "winglet_height_max_m",
+        minimum=0.005,
+        maximum=10.0,
+    )
+    winglet_cant_bounds = _bounds(
+        wing_cfg,
+        "winglet_cant_min_deg",
+        "winglet_cant_max_deg",
+        minimum=45.0,
+        maximum=90.0,
+    )
+    winglet_toe_bounds = _bounds(
+        wing_cfg,
+        "winglet_toe_min_deg",
+        "winglet_toe_max_deg",
+        minimum=-10.0,
+        maximum=10.0,
+    )
+    winglet_taper_bounds = _bounds(
+        wing_cfg,
+        "winglet_taper_min",
+        "winglet_taper_max",
+        minimum=0.10,
+        maximum=1.20,
     )
 
     quality = str(solver_cfg.get("quality", "balanced"))
@@ -532,13 +599,21 @@ def run_design(
     flow5_runner_path = str(solver_cfg.get("flow5_runner_path", "")).strip()
     flow5_threads = int(_number(solver_cfg, "flow5_threads", minimum=1.0, maximum=64.0))
     flow5_timeout = _number(
-        solver_cfg, "flow5_timeout_seconds", minimum=30.0, maximum=7200.0
+        solver_cfg, "flow5_timeout_seconds", minimum=30.0, maximum=21600.0
     )
     flow5_foil_budget = int(
         _number(solver_cfg, "flow5_foil_candidate_budget", minimum=8.0, maximum=4096.0)
     )
     flow5_wing_budget = int(
         _number(solver_cfg, "flow5_wing_candidate_budget", minimum=8.0, maximum=2048.0)
+    )
+    flow5_winglet_budget = int(
+        _number(
+            solver_cfg,
+            "flow5_winglet_candidate_budget",
+            minimum=8.0,
+            maximum=2048.0,
+        )
     )
     flow5_finalists = int(
         _number(solver_cfg, "flow5_finalists", minimum=1.0, maximum=8.0)
@@ -595,6 +670,12 @@ def run_design(
         raise InputError("Final flow5 ağı, arama ağından daha kaba olamaz")
     if flow5_convergence_mesh.nominal_panels <= flow5_final_mesh.nominal_panels:
         raise InputError("Yakınsama flow5 ağı, final ağından daha ince olmalı")
+    if winglet_optimization_enabled and min(
+        flow5_search_mesh.half_span_panels,
+        flow5_final_mesh.half_span_panels,
+        flow5_convergence_mesh.half_span_panels,
+    ) < 6:
+        raise InputError("Winglet çözümü için yarı açıklık panel sayıları en az 6 olmalı")
     flow5_mesh_convergence_enabled = _boolean(
         solver_cfg, "flow5_mesh_convergence_enabled"
     )
@@ -869,6 +950,12 @@ def run_design(
             multi_section_geometry_enabled=multi_section_geometry_enabled,
             mid_chord_factor_bounds=mid_chord_factor_bounds,
             mid_twist_bounds=mid_twist_bounds,
+            winglet_optimization_enabled=winglet_optimization_enabled,
+            winglet_candidate_budget=flow5_winglet_budget,
+            winglet_height_bounds=winglet_height_bounds,
+            winglet_cant_bounds=winglet_cant_bounds,
+            winglet_toe_bounds=winglet_toe_bounds,
+            winglet_taper_bounds=winglet_taper_bounds,
             structural_settings=structural_settings,
             hydro_settings=hydro_settings,
             spanwise_airfoil_optimization_enabled=flow5_spanwise_airfoil_optimization_enabled,
@@ -992,6 +1079,10 @@ def run_design(
                 "taper": taper_bounds[1] - taper_bounds[0],
                 "sweep_deg": sweep_bounds[1] - sweep_bounds[0],
                 "tip_twist_deg": twist_bounds[1] - twist_bounds[0],
+                "winglet_height": winglet_height_bounds[1] - winglet_height_bounds[0],
+                "winglet_cant_deg": winglet_cant_bounds[1] - winglet_cant_bounds[0],
+                "winglet_toe_deg": winglet_toe_bounds[1] - winglet_toe_bounds[0],
+                "winglet_taper": winglet_taper_bounds[1] - winglet_taper_bounds[0],
             },
         )
         selected_record = seed_records[int(stability["selected_record_index"])]
@@ -1013,6 +1104,10 @@ def run_design(
             "taper": taper_bounds,
             "sweep_deg": sweep_bounds,
             "tip_twist_deg": twist_bounds,
+            "winglet_height": winglet_height_bounds,
+            "winglet_cant_deg": winglet_cant_bounds,
+            "winglet_toe_deg": winglet_toe_bounds,
+            "winglet_taper": winglet_taper_bounds,
         }
         selected_result["diagnostic_report"] = build_diagnostic_report(
             selected_result, diagnostic_bounds
