@@ -1,6 +1,6 @@
 # AeroOpt 0.8 — flow5 tabanlı çok amaçlı profil ve kanat optimizasyonu
 
-AeroOpt, Eppler E818 veya kullanıcının verdiği bir DAT profiliyle başlar; serbest biçimli CST/Kulfan profilini ve üç istasyonlu kanat planformunu gerçek flow5 analizleriyle optimize eder. Varsayılan `flow5_native` zincirinde AeroOpt'un eski aerodinamik korelasyonları amaç fonksiyonuna girmez.
+AeroOpt, Eppler E818 veya kullanıcının verdiği bir DAT profiliyle başlar; serbest biçimli CST/Kulfan profilini, üç istasyonlu planar kanadı ve istenirse dördüncü yüksek-dihedral winglet kesitini gerçek flow5 analizleriyle optimize eder. Varsayılan `flow5_native` zincirinde AeroOpt'un eski aerodinamik korelasyonları amaç fonksiyonuna girmez.
 
 ## Tasarım zinciri
 
@@ -8,13 +8,14 @@ AeroOpt, Eppler E818 veya kullanıcının verdiği bir DAT profiliyle başlar; s
 2. Profil adayları Differential Evolution ile oluşturulur. RBF surrogate yeterli gerçek örnek oluşunca yalnızca hangi DE önerisinin çözücüye gideceğini seçer; amaç değeri hiçbir zaman tahminle değiştirilmez. Her solver DAT'ı başlık hariç tam **100 koordinat noktası** içerir.
 3. Her aday, hız aralığındaki Reynolds/Mach noktalarında flow5'in gömülü `XFoilTask` çözücüsüyle analiz edilir.
 4. Profil ve kanat varsayılan iki bağlı iterasyonda çalışır: ilk kanattan alınan gerçek MAC, Reynolds ve spanwise yerel Cl hedefleri yeniden profil optimizasyonuna beslenir.
-5. Kanat açıklığı, kök chord, taper, çeyrek-chord sweep, uç twist; istenirse orta-istasyon chord ve twist değişkenleri optimize edilir.
+5. Kanat açıklığı, kök chord, taper, çeyrek-chord sweep, uç twist; istenirse orta-istasyon chord ve twist değişkenleri optimize edilir. Winglet tasarımı açılırsa önce planar optimum, ardından aynı izdüşümsel span/hedef taşımada yükseklik–cant–toe–taper winglet aşaması çözülür ve iki tasarım doğrudan karşılaştırılır.
 6. Arama ağı ve final ağı sonrasında daha ince üçüncü ağla CD/hedef-Cl alfa yakınsaması kontrol edilir. Yakınsamayan, `out_of_mesh` olan veya viskoz çözümü başarısız noktalar uygun kabul edilmez.
 7. İstenirse kök–orta–uç profilleri yerel Reynolds/Cl koşullarında ayrı ayrı optimize edilir ve üç profilli kanat yeniden çözülür.
 8. Varsayılan kanat optimizeri gerçek NSGA-II'dir. Sürükleme, kök momenti ve stall kullanımı; yapısal denetim açıksa ayrıca kütle/yapısal kullanım, Pareto rütbesi ve crowding-distance ile birlikte optimize edilir.
 9. Profil ve kanat başlangıç bütçeleri, amaç/Pareto hareketi tolerans dışındaysa örneğin `48 → 96 → 192` biçiminde otomatik büyür. Yakınsama sağlanırsa kullanılmayan bütçe harcanmaz; azami bütçede hareket sürerse sonuç bütçe-sınırlı işaretlenir.
-10. Solver kimliği, 100-nokta sözleşmesi, kuvvet/CD kapanışı, mesh, telemetri ve fiziksel makullük kontrolleri otomatik doğrulama raporuna yazılır.
-11. Sonuçlar DAT, XML, OBJ, CSV, doğrulama/Pareto/teşhis JSON'ları, ZIP ve yalnızca flow5 gerçekten kaydettiyse `.fl5` olarak dışa aktarılır.
+10. Su taraması açıksa arama adaylarında hızlı `Cp_min` kısıtı kullanılır; seçilen yüksek çözünürlüklü finalistte gerçek flow5 panel köşeleri ve Cp değerleri ayrıca alınarak 3B risk haritası, riskli alan, açıklık dağılımı ve hız/derinlik duyarlılığı hesaplanır.
+11. Solver kimliği, 100-nokta sözleşmesi, kuvvet/CD kapanışı, mesh, telemetri ve fiziksel makullük kontrolleri otomatik doğrulama raporuna yazılır.
+12. Sonuçlar DAT, XML, OBJ, CSV, doğrulama/Pareto/teşhis/kavitasyon JSON'ları, ZIP ve yalnızca flow5 gerçekten kaydettiyse `.fl5` olarak dışa aktarılır.
 
 Uzun işlemler arka planda yürür. Arayüz gerçek aşama/aday/seed ilerlemesini gösterir ve işi iptal edebilir. İki ayrı devam katmanı vardır: SHA-256 değerlendirme önbelleği tamamlanmış flow5 yanıtlarını, optimizer checkpoint'i ise DE veya NSGA-II popülasyonunu, nesli, değerlendirme geçmişini, bütçe denetleyicisini, RNG durumunu ve varsa surrogate örneklerini atomik JSON olarak saklar. Checkpoint nesil sınırlarında alınır; neslin ortasında iptal edilirse son tamamlanmış nesilden devam edilir. Başarıyla biten problem checkpoint'i temizlenir.
 
@@ -28,6 +29,7 @@ Uzun işlemler arka planda yürür. Arayüz gerçek aşama/aday/seed ilerlemesin
 | Optimizer checkpoint | Açık | Popülasyon + RNG + surrogate durumunu problem parmak iziyle saklar; aynı ayarlarla yeniden başlatınca geri yükler |
 | Multi-seed | 1 koşu | Arayüzden 3 veya 5 bağımsız seed seçilebilir; en iyi fizibil koşu seçilir, amaç/geometri CV raporlanır |
 | Pareto analizi | Açık | NSGA-II seçilince cephe optimizer tarafından üretilir; DE/adaptive seçilince gerçek çözücü adaylarından sonradan çıkarılır |
+| Winglet tasarımı | Kapalı | Planar optimumdan sonra dört-kesitli yüksek-dihedral flow5 geometrisinde yükseklik, cant, toe ve taper aranır; drag, indüklenmiş CD, L/D ve kök moment farkları raporlanır |
 | Doğrulama/regresyon | Açık | Dokuz tutarlılık/makullük kontrolü ve tekrarlanabilir SHA-256 sonuç imzası üretir |
 | Otomatik teşhis | Açık | Stall, Reynolds, drag bileşeni, mesh, solver noktası, sınır, coupling, seed, yapı ve kavitasyon kanıtlarını kurallarla sıralar |
 | Proje geçmişi | Açık | Son 12 tasarım özetini tarayıcı yerel depolamasında tutar ve iki tasarımı yan yana karşılaştırır |
@@ -39,9 +41,11 @@ Surrogate, CFD/flow5 yerine geçen bir fizik modeli değildir. Yalnızca pahalı
 | Kontrol | Varsayılan | Ne yapar | Sınırı |
 |---|---:|---|---|
 | Yapısal denetim | **Kapalı** | flow5 spanwise yüküyle Euler–Bernoulli eğilme, kapalı ince cidarlı burulma, gerilme/sehim/twist kullanımı ve yaklaşık malzeme kütlesi | FEA değildir; deforme kanadı tekrar aerodinamik olarak çözmez |
-| Su/kavitasyon | Su seçilince kullanılabilir | flow5 `Cp_min`, hidrostatik basınç ve buhar basıncıyla kavitasyon marjı; chord Froude sayısı ve derinlik/MAC ile serbest-yüzey risk bayrağı | Çok fazlı CFD veya serbest-yüzey çözümü değildir |
+| Su/kavitasyon | Su seçilince kullanılabilir | Aramada flow5 `Cp_min`; finalistte panel Cp/alan/geometrisiyle 3B risk haritası, emniyetli–yakın–riskli alan, fiziksel başlangıç alanı, basınç açığı, şiddet ve hız/derinlik duyarlılığı | Tek fazlı başlangıç taramasıdır; kavite boyu/hacmi veya L/D kaybı değildir |
 
 Yapısal kontrolü istemiyorsanız arayüzde **Yapısal denetimi etkinleştir** kutusunu boş bırakın. Bu durumda yapısal hesap yapılmaz ve optimizasyon puanına hiçbir yapısal ceza eklenmez. Kutuyu işaretlerseniz yalnızca ön boyutlandırma amaçlı sonuçlar amaç fonksiyonuna ve uygunluk kararına katılır.
+
+Kavitasyon için **Sert kısıt** seçimi `Cp_min` kullanımını aday uygunluğuna ve amaç fonksiyonuna dahil eder. **Yalnız raporla** seçimi aynı finalist panel haritasını ve etki göstergelerini üretir fakat L/D tabanlı tasarım seçimini değiştirmez. Renkli harita seçilen yüksek çözünürlüklü final çözümünden gelir; binlerce arama adayında panel geometrisi taşınmadığı için arama maliyeti gereksiz yere büyümez.
 
 ## Windows'ta en kolay kullanım
 
@@ -52,7 +56,7 @@ Depoyu GitHub'a yükledikten sonra yerel bilgisayara Python, Qt, Visual Studio, 
 3. İş bitince `AeroOpt-0.8.0-Windows-flow5` artifact'ini indirin.
 4. ZIP'i tamamen çıkarıp `AeroOpt.exe` dosyasını çalıştırın.
 
-İş akışı Python testlerini çalıştırır; sabitlenmiş flow5 kaynaklarını ve C++ runner'ı derler; gerçek E818/100-nokta profil, VLM2, TRIUNIFORM, telemetri ve `.fl5` smoke testlerini geçmeden paketi yayımlamaz.
+İş akışı Python testlerini çalıştırır; sabitlenmiş flow5 kaynaklarını ve C++ runner'ı derler; gerçek E818/100-nokta profil, VLM2, TRIUNIFORM winglet, panel Cp haritası, telemetri ve `.fl5` smoke testlerini geçmeden paketi yayımlamaz.
 
 Paket içindeki uygulamada **flow5 runner yolu** boş bırakılır. Arayüz `aeropt-flow5-runner.exe` dosyasını otomatik bulur. `flow5.exe`, `flow5-runner.exe` veya `fake_flow5_runner.exe` bu alan için uygun değildir.
 
@@ -103,11 +107,13 @@ Runner'ı elle derlemek için Visual Studio 2022 C++, CMake 3.20+, Qt 6, Gmsh, O
 2. Kanat sınırlarını girin; E818, CST6 ve 100 profil noktası seçili kalabilir.
 3. Hızlı kurulum kontrolünde profil/kanat başlangıç bütçelerini `8 / 8`, finalist sayısını `1` yapın. Mutlak kısa smoke test istiyorsanız otomatik bütçe denetimini geçici olarak kapatın; açıkken arama gerek görürse `8 → 16 → 32` büyür.
 4. Mesh yakınsamasını açık bırakın. Arama/final/ince varsayılanları sırasıyla `10×14`, `14×22`, `20×32`'dir.
-5. Yapısal hesabı istemiyorsanız yapısal anahtarı kapalı bırakın. Su seçtiyseniz derinlik, buhar basıncı ve kavitasyon güvenlik katsayısını kontrol edin.
+5. Yapısal hesabı istemiyorsanız yapısal anahtarı kapalı bırakın. Su seçtiyseniz derinlik, buhar basıncı, kavitasyon güvenlik katsayısı ve sert-kısıt/yalnız-rapor politikasını kontrol edin.
 6. İlk kontrol için multi-seed değerini `1` bırakın; surrogate, checkpoint ve otomatik doğrulamayı açık bırakın.
 7. **Optimizasyonu başlat** düğmesine basın. Üretim ön tasarımında `48 / 48 / 3`, otomatik bütçe `2× / 4× / %3` ve doğrulama koşusu için multi-seed `3` iyi bir başlangıçtır.
 
 Kök–orta–uç profillerini ayrı optimize etme seçeneği varsayılan olarak kapalıdır; açıldığında iki ek profil optimizasyonu ve bir üç-profilli final kanat çözümü yaptığı için süreyi belirgin artırır.
+
+Tek bir flow5 adayının zaman aşımı arayüzden en çok **21.600 s (6 saat)** yapılabilir; bu sınır önceki 7.200 s değerinden yükseltilmiştir. Bu ayar bütün optimizasyonun toplam süresi değil, her ayrı runner çağrısının üst sınırıdır.
 
 ## Optimizasyon ve çözücü ayrıntıları
 
@@ -135,6 +141,15 @@ Kök–orta–uç profillerini ayrı optimize etme seçeneği varsayılan olarak
 - Final doğrulamasına skaler uzlaşma adayı ile Pareto cephesinin seyrek bölgelerinden temsilciler birlikte gönderilir; tek teslim tasarımı ince mesh finalistleri arasındaki en iyi skaler uzlaşmadır.
 - Viskoz profil drag'i gömülü XFoil'den; 3B/indüklenmiş bileşen ve spanwise dağılım flow5 çalışma noktalarından gelir.
 - İnce ağdaki sonuç final `.fl5` projesine yazılır. Eş alanlı dikdörtgen baseline aynı final yöntem/ağ ile karşılaştırılır.
+- Winglet seçeneği planar aramayı kaldırmaz. Planar optimum tamamlandıktan sonra ana planform sabitlenir; toplam izdüşümsel span korunarak ana kanat yarı-açıklığı winglet yatay izdüşümü kadar kısaltılır ve dördüncü yüksek-dihedral kesitte yalnız yükseklik, cant, toe ve taper optimize edilir. Son karar fizibiliteyi önceleyip aynı planform/hedef taşıma koşulundaki kısıtlı toplam amacı karşılaştırır.
+
+### Kavitasyon haritası ve etki göstergeleri
+
+- Arama boyunca her adayın en kötü flow5 `Cp_min` değeri Bernoulli hidrostatik basıncı ve kullanıcı emniyet katsayısıyla hızlıca taranır.
+- Yalnız seçilen yüksek çözünürlüklü finalist için hedef taşımaya en yakın gerçek `PlaneOpp` noktasındaki panel köşeleri, alanı, yüzey normali ve Cp alınır. TRIUNIFORM/TRILINEAR için üç düğüm Cp'sinin panel ortalaması; QUADS/VLM için `WingOpp` panel Cp'si kullanılır.
+- Panel kullanımı `U = emniyet × max(-Cp, 0) / σ`, `σ = (p_atm + ρgh - p_v) / q` olarak hesaplanır. Haritada `U < 0,8` güvenli, `0,8 ≤ U < 1` sınıra yakın ve `U ≥ 1` riskli gösterilir.
+- Rapor; riskli alan yüzdesi, emniyet katsayısız fiziksel başlangıç alanı, maksimum kullanım, alan-ağırlıklı şiddet, buhar basıncı altındaki basınç açığı–alan integrali, bileşen/yüzey ve açıklık dağılımlarını içerir.
+- Hız ve derinlik grafikleri finalist Cp alanını sabit tutan beşer noktalı duyarlılık taramasıdır. Bunlar çok fazlı yeniden çözüm değildir; gerçek kavite boyu/hacmi, ventilasyon veya kavitasyon kaynaklı drag/L/D kaybı iddia edilmez.
 
 ### 16 çekirdek
 
@@ -178,12 +193,25 @@ result = run_design({
         "cst_order": 6,
         "solver_coordinate_points": 100,
     },
+    "wing": {
+        "winglet_optimization_enabled": True,
+        "winglet_height_min_m": 0.10,
+        "winglet_height_max_m": 0.35,
+        "winglet_cant_min_deg": 65.0,
+        "winglet_cant_max_deg": 90.0,
+        "winglet_toe_min_deg": -3.0,
+        "winglet_toe_max_deg": 3.0,
+        "winglet_taper_min": 0.35,
+        "winglet_taper_max": 0.85
+    },
     "solver": {
         "airfoil_strategy": "flow5_native",
         "flow5_runner_path": r"C:\Tools\aeropt-flow5-runner.exe",
         "flow5_threads": 16,
         "flow5_foil_candidate_budget": 48,
         "flow5_wing_candidate_budget": 48,
+        "flow5_winglet_candidate_budget": 48,
+        "flow5_timeout_seconds": 21600,
         "flow5_wing_optimizer": "nsga2",
         "flow5_budget_escalation_enabled": True,
         "flow5_budget_growth_factor": 2.0,
@@ -195,6 +223,12 @@ result = run_design({
         "flow5_surrogate_proposals_per_evaluation": 6,
         "flow5_checkpoint_enabled": True,
         "flow5_multi_seed_runs": 3,
+    },
+    "hydro": {
+        "enabled": True,
+        "constraint_mode": "report_only",
+        "submergence_depth_m": 1.0,
+        "cavitation_safety_factor": 1.2
     },
     "structure": {"enabled": False},
     "validation": {"enabled": True},

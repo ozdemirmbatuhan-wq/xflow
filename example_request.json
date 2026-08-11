@@ -41,7 +41,16 @@
     "mid_chord_factor_min": 0.85,
     "mid_chord_factor_max": 1.15,
     "mid_twist_min_deg": -4.0,
-    "mid_twist_max_deg": 1.0
+    "mid_twist_max_deg": 1.0,
+    "winglet_optimization_enabled": false,
+    "winglet_height_min_m": 0.05,
+    "winglet_height_max_m": 0.4,
+    "winglet_cant_min_deg": 60.0,
+    "winglet_cant_max_deg": 90.0,
+    "winglet_toe_min_deg": -3.0,
+    "winglet_toe_max_deg": 3.0,
+    "winglet_taper_min": 0.3,
+    "winglet_taper_max": 1.0
   },
   "solver": {
     "quality": "balanced",
@@ -53,6 +62,7 @@
     "flow5_timeout_seconds": 900.0,
     "flow5_foil_candidate_budget": 48,
     "flow5_wing_candidate_budget": 48,
+    "flow5_winglet_candidate_budget": 48,
     "flow5_finalists": 3,
     "flow5_search_method": "VLM2",
     "flow5_final_method": "TRIUNIFORM",
@@ -121,6 +131,7 @@
   },
   "hydro": {
     "enabled": true,
+    "constraint_mode": "hard",
     "submergence_depth_m": 1.0,
     "ambient_pressure_pa": 101325.0,
     "vapor_pressure_pa": 1705.0,
