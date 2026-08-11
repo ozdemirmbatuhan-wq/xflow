@@ -74,23 +74,228 @@ def run_foil(request: dict) -> dict:
     return {"polars": polars}
 
 
-def plane_geometry(path: Path) -> tuple[float, float, float, float, float, float, float]:
+def plane_geometry(path: Path) -> dict[str, float | bool]:
     text = path.read_text(encoding="utf-8").replace("<!DOCTYPE flow5>", "")
     root = ET.fromstring(text)
     sections = root.findall(".//Section")
+    if len(sections) not in {3, 4}:
+        raise ValueError(f"expected three or four wing sections, found {len(sections)}")
+    winglet_enabled = len(sections) == 4 and abs(
+        float(sections[-2].findtext("Dihedral", "0"))
+    ) > 1.0e-8
+    main_tip_index = -2 if winglet_enabled else -1
     root_chord = float(sections[0].findtext("Chord"))
-    tip_chord = float(sections[-1].findtext("Chord"))
-    mid_chord = float(sections[len(sections) // 2].findtext("Chord"))
-    half_span = float(sections[-1].findtext("y_position"))
-    tip_offset = float(sections[-1].findtext("xOffset"))
-    twist = float(sections[-1].findtext("Twist"))
-    mid_twist = float(sections[len(sections) // 2].findtext("Twist"))
-    span = 2.0 * half_span
-    taper = tip_chord / root_chord
-    sweep = math.degrees(math.atan2(tip_offset - 0.25 * (root_chord - tip_chord), half_span))
-    linear_mid = 0.5 * (root_chord + tip_chord)
+    main_tip_chord = float(sections[main_tip_index].findtext("Chord"))
+    mid_chord = float(sections[1].findtext("Chord"))
+    main_half_span = float(sections[main_tip_index].findtext("y_position"))
+    main_tip_offset = float(sections[main_tip_index].findtext("xOffset"))
+    twist = float(sections[main_tip_index].findtext("Twist"))
+    mid_twist = float(sections[1].findtext("Twist"))
+    winglet_length = 0.0
+    winglet_height = 0.0
+    winglet_projection = 0.0
+    winglet_taper = 1.0
+    winglet_toe = 0.0
+    cant_deg = 90.0
+    winglet_tip_chord = main_tip_chord
+    if winglet_enabled:
+        winglet_length = (
+            float(sections[-1].findtext("y_position")) - main_half_span
+        )
+        cant_deg = float(sections[-2].findtext("Dihedral"))
+        cant = math.radians(cant_deg)
+        winglet_height = winglet_length * math.sin(cant)
+        winglet_projection = winglet_length * math.cos(cant)
+        winglet_tip_chord = float(sections[-1].findtext("Chord"))
+        winglet_taper = winglet_tip_chord / max(main_tip_chord, 1.0e-12)
+        winglet_toe = float(sections[-1].findtext("Twist")) - twist
+    projected_half_span = main_half_span + winglet_projection
+    span = 2.0 * projected_half_span
+    taper = main_tip_chord / root_chord
+    sweep = math.degrees(
+        math.atan2(
+            main_tip_offset - 0.25 * (root_chord - main_tip_chord),
+            main_half_span,
+        )
+    )
+    linear_mid = 0.5 * (root_chord + main_tip_chord)
     mid_factor = mid_chord / max(linear_mid, 1e-12)
-    return span, root_chord, taper, sweep, twist, mid_factor, mid_twist
+    main_area = 0.5 * main_half_span * (
+        root_chord + 2.0 * mid_chord + main_tip_chord
+    )
+    winglet_projected_area = winglet_projection * (
+        main_tip_chord + winglet_tip_chord
+    )
+    winglet_surface_area = winglet_length * (
+        main_tip_chord + winglet_tip_chord
+    )
+    return {
+        "span": span,
+        "main_half_span": main_half_span,
+        "root_chord": root_chord,
+        "taper": taper,
+        "sweep": sweep,
+        "twist": twist,
+        "mid_factor": mid_factor,
+        "mid_twist": mid_twist,
+        "area": main_area + winglet_projected_area,
+        "winglet_enabled": winglet_enabled,
+        "winglet_height": winglet_height,
+        "winglet_length": winglet_length,
+        "winglet_projection": winglet_projection,
+        "winglet_cant_deg": cant_deg,
+        "winglet_toe_deg": winglet_toe,
+        "winglet_taper": winglet_taper,
+        "winglet_surface_area": winglet_surface_area,
+    }
+
+
+def panel_telemetry(
+    geometry: dict[str, float | bool],
+    *,
+    chordwise_panels: int,
+    half_span_panels: int,
+    target_cl: float,
+    sampled_cl: float,
+    sampled_alpha_deg: float,
+    thin_surfaces: bool,
+) -> dict:
+    """Geometry/Cp-shaped test data; never used as an aerodynamic model."""
+    panels = []
+    root_chord = float(geometry["root_chord"])
+    tip_chord = root_chord * float(geometry["taper"])
+    mid_chord = 0.5 * (root_chord + tip_chord) * float(geometry["mid_factor"])
+    main_half_span = float(geometry["main_half_span"])
+    sweep_tangent = math.tan(math.radians(float(geometry["sweep"])))
+
+    def chord_at(eta: float) -> float:
+        if eta <= 0.5:
+            return root_chord + 2.0 * eta * (mid_chord - root_chord)
+        return mid_chord + 2.0 * (eta - 0.5) * (tip_chord - mid_chord)
+
+    def add_panel(
+        vertices: list[list[float]],
+        *,
+        area: float,
+        cp: float,
+        side: str,
+        component: str,
+        surface_index: int,
+        leading: bool,
+        trailing: bool,
+    ) -> None:
+        center = [sum(vertex[axis] for vertex in vertices) / len(vertices) for axis in range(3)]
+        panels.append(
+            {
+                "panel_index": len(panels),
+                "wing_index": 0,
+                "surface_index": surface_index,
+                "surface": "mid" if thin_surfaces else "upper",
+                "component": component,
+                "side": side,
+                "x_m": center[0],
+                "y_m": center[1],
+                "z_m": center[2],
+                "nx": 0.0,
+                "ny": 0.0,
+                "nz": 1.0,
+                "area_m2": area,
+                "cp": cp,
+                "leading_edge_panel": leading,
+                "trailing_edge_panel": trailing,
+                "vertices": vertices,
+            }
+        )
+
+    for side_sign, side_name in ((-1.0, "left"), (1.0, "right")):
+        for span_index in range(half_span_panels):
+            eta0 = span_index / half_span_panels
+            eta1 = (span_index + 1) / half_span_panels
+            chord0 = chord_at(eta0)
+            chord1 = chord_at(eta1)
+            y0 = side_sign * eta0 * main_half_span
+            y1 = side_sign * eta1 * main_half_span
+            xle0 = abs(y0) * sweep_tangent
+            xle1 = abs(y1) * sweep_tangent
+            for chord_index in range(chordwise_panels):
+                xc0 = chord_index / chordwise_panels
+                xc1 = (chord_index + 1) / chordwise_panels
+                xc = 0.5 * (xc0 + xc1)
+                eta = 0.5 * (eta0 + eta1)
+                cp = -0.18 - 1.35 * max(sampled_cl, 0.0) * (1.0 - xc) ** 0.58 * (
+                    0.86 + 0.28 * eta
+                )
+                add_panel(
+                    [
+                        [xle0 + xc0 * chord0, y0, 0.0],
+                        [xle0 + xc1 * chord0, y0, 0.0],
+                        [xle1 + xc1 * chord1, y1, 0.0],
+                        [xle1 + xc0 * chord1, y1, 0.0],
+                    ],
+                    area=abs(y1 - y0) * 0.5 * (chord0 + chord1) / chordwise_panels,
+                    cp=cp,
+                    side=side_name,
+                    component="main_wing",
+                    surface_index=1,
+                    leading=chord_index == 0,
+                    trailing=chord_index == chordwise_panels - 1,
+                )
+
+    if bool(geometry["winglet_enabled"]):
+        span_panels = max(2, half_span_panels // 4)
+        length = float(geometry["winglet_length"])
+        projection = float(geometry["winglet_projection"])
+        height = float(geometry["winglet_height"])
+        winglet_tip_chord = tip_chord * float(geometry["winglet_taper"])
+        for side_sign, side_name, surface_index in (
+            (-1.0, "left", 0),
+            (1.0, "right", 2),
+        ):
+            for span_index in range(span_panels):
+                fraction0 = span_index / span_panels
+                fraction1 = (span_index + 1) / span_panels
+                chord0 = tip_chord + fraction0 * (winglet_tip_chord - tip_chord)
+                chord1 = tip_chord + fraction1 * (winglet_tip_chord - tip_chord)
+                y0 = side_sign * (main_half_span + fraction0 * projection)
+                y1 = side_sign * (main_half_span + fraction1 * projection)
+                z0 = fraction0 * height
+                z1 = fraction1 * height
+                for chord_index in range(chordwise_panels):
+                    xc0 = chord_index / chordwise_panels
+                    xc1 = (chord_index + 1) / chordwise_panels
+                    xc = 0.5 * (xc0 + xc1)
+                    fraction = 0.5 * (fraction0 + fraction1)
+                    cp = -0.15 - 1.10 * max(sampled_cl, 0.0) * (1.0 - xc) ** 0.62 * (
+                        0.90 + 0.20 * fraction
+                    )
+                    add_panel(
+                        [
+                            [xc0 * chord0, y0, z0],
+                            [xc1 * chord0, y0, z0],
+                            [xc1 * chord1, y1, z1],
+                            [xc0 * chord1, y1, z1],
+                        ],
+                        area=length * 0.5 * (chord0 + chord1)
+                        / (span_panels * chordwise_panels),
+                        cp=cp,
+                        side=side_name,
+                        component="winglet",
+                        surface_index=surface_index,
+                        leading=chord_index == 0,
+                        trailing=chord_index == chordwise_panels - 1,
+                    )
+
+    return {
+        "target_cl": target_cl,
+        "sampled_cl": sampled_cl,
+        "sampled_alpha_deg": sampled_alpha_deg,
+        "panel_count": len(panels),
+        "panel_area_sum_m2": sum(float(panel["area_m2"]) for panel in panels),
+        "thin_surfaces": thin_surfaces,
+        "upper_lower_resolved": not thin_surfaces,
+        "cp_definition": "flow5 thin-surface panel pressure coefficient",
+        "panels": panels,
+    }
 
 
 def run_wing(request: dict) -> dict:
@@ -100,12 +305,17 @@ def run_wing(request: dict) -> dict:
             assert_coordinate_count(request, Path(request["paths"][section["path_key"]]))
     else:
         assert_coordinate_count(request, Path(request["paths"]["foil.dat"]))
-    span, root_chord, taper, sweep, twist, mid_factor, mid_twist = plane_geometry(
-        Path(request["paths"]["plane.xml"])
-    )
+    geometry = plane_geometry(Path(request["paths"]["plane.xml"]))
+    span = float(geometry["span"])
+    root_chord = float(geometry["root_chord"])
+    taper = float(geometry["taper"])
+    sweep = float(geometry["sweep"])
+    twist = float(geometry["twist"])
+    mid_factor = float(geometry["mid_factor"])
+    mid_twist = float(geometry["mid_twist"])
     tip_chord = root_chord * taper
     mid_chord = 0.5 * (root_chord + tip_chord) * mid_factor
-    area = 0.25 * span * (root_chord + 2.0 * mid_chord + tip_chord)
+    area = float(geometry["area"])
     aspect_ratio = span * span / area
     density = float(request["fluid"]["density_kg_m3"])
     method = request["method"]
@@ -124,6 +334,20 @@ def run_wing(request: dict) -> dict:
         - 0.025 * (mid_factor - 1.08) ** 2
         - 0.002 * (mid_twist - 0.55 * twist) ** 2,
     )
+    winglet_area_ratio = float(geometry["winglet_surface_area"]) / max(area, 1.0e-12)
+    winglet_quality = 0.0
+    if geometry["winglet_enabled"]:
+        cant = math.radians(float(geometry["winglet_cant_deg"]))
+        toe = float(geometry["winglet_toe_deg"])
+        winglet_taper = float(geometry["winglet_taper"])
+        winglet_quality = (
+            max(math.sin(cant), 0.0)
+            * math.exp(-0.055 * toe**2)
+            * math.exp(-1.4 * (winglet_taper - 0.55) ** 2)
+        )
+    induced_relief = 1.0 + 1.6 * float(geometry["winglet_height"]) / max(
+        span, 1.0e-12
+    ) * winglet_quality
     cases = []
     for case in request["cases"]:
         speed = float(case["speed_m_s"])
@@ -131,8 +355,14 @@ def run_wing(request: dict) -> dict:
         points = []
         for alpha in alphas(request):
             cl = 0.145 * (alpha + 0.7 + 0.11 * twist)
-            cdi = cl * cl / (math.pi * aspect_ratio * efficiency)
-            cdv = 0.0080 + 0.0012 * (root_chord - 0.33) ** 2 + method_delta + 0.0014 * cl**2
+            cdi = cl * cl / (math.pi * aspect_ratio * efficiency * induced_relief**2)
+            cdv = (
+                0.0080
+                + 0.0012 * (root_chord - 0.33) ** 2
+                + method_delta
+                + 0.0014 * cl**2
+                + 0.0065 * winglet_area_ratio
+            )
             cd = cdi + cdv + mesh_delta
             distribution = []
             for index in range(-5, 6):
@@ -181,7 +411,22 @@ def run_wing(request: dict) -> dict:
                     "distribution": distribution,
                 }
             )
-        cases.append({"speed_m_s": speed, "method": method, "points": points})
+        output_case = {"speed_m_s": speed, "method": method, "points": points}
+        if request.get("panel_telemetry"):
+            target_cl = float(request["panel_telemetry_target_lift_n"]) / max(
+                q * area, 1.0e-12
+            )
+            sampled = min(points, key=lambda point: abs(float(point["cl"]) - target_cl))
+            output_case["panel_telemetry"] = panel_telemetry(
+                geometry,
+                chordwise_panels=chordwise_panels,
+                half_span_panels=half_span_panels,
+                target_cl=target_cl,
+                sampled_cl=float(sampled["cl"]),
+                sampled_alpha_deg=float(sampled["alpha_deg"]),
+                thin_surfaces=bool(request.get("thin_surfaces", True)),
+            )
+        cases.append(output_case)
     artifacts = {}
     if request.get("save_project"):
         project = Path(request["output_dir"]) / "aeropt-optimized.fl5"

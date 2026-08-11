@@ -12,7 +12,7 @@ from aeropt.baselines import build_baseline_profile
 from aeropt.checkpoint import OptimizerCheckpointStore, optimizer_fingerprint
 from aeropt.convergence import BudgetEscalationController, BudgetEscalationSettings
 from aeropt.diagnostics import diagnose_runtime_failure
-from aeropt.exporters import flow5_plane_xml
+from aeropt.exporters import flow5_plane_xml, wing_obj
 from aeropt.flow5 import Flow5Mesh, Flow5Runner
 from aeropt.flow5_optimization import (
     WingCandidate,
@@ -75,6 +75,52 @@ class AdvancedAnalysisTests(unittest.TestCase):
             all(section.findtext("x_number_of_panels") == "12" for section in sections)
         )
 
+    def test_winglet_geometry_preserves_projected_span_and_exports_four_sections(self):
+        geometry = WingGeometry(
+            span=4.4,
+            root_chord=1.1,
+            taper=0.45,
+            sweep_deg=4.0,
+            tip_twist_deg=-2.0,
+            alpha_deg=2.0,
+            mid_chord_factor=1.04,
+            mid_twist_deg=-0.8,
+            winglet_enabled=True,
+            winglet_height=0.35,
+            winglet_cant_deg=78.0,
+            winglet_toe_deg=-1.2,
+            winglet_taper=0.55,
+        )
+        self.assertTrue(geometry.winglet_active)
+        self.assertTrue(geometry.winglet_geometry_valid)
+        self.assertLess(geometry.main_span, geometry.span)
+        self.assertGreater(geometry.developed_area, geometry.area)
+
+        foil = build_baseline_profile("e818").foil
+        xml = flow5_plane_xml(
+            foil, geometry, chordwise_panels=12, half_span_panels=24
+        ).replace("<!DOCTYPE flow5>", "")
+        root = ET.fromstring(xml)
+        sections = root.findall(".//Section")
+        self.assertEqual(len(sections), 4)
+        self.assertEqual(
+            sum(int(section.findtext("y_number_of_panels")) for section in sections),
+            24,
+        )
+        self.assertAlmostEqual(float(sections[2].findtext("Dihedral")), 78.0)
+        main_tip_y = float(sections[2].findtext("y_position"))
+        winglet_tip_y = float(sections[3].findtext("y_position"))
+        projected_semispan = main_tip_y + (winglet_tip_y - main_tip_y) * np.cos(
+            np.deg2rad(78.0)
+        )
+        self.assertAlmostEqual(projected_semispan, 0.5 * geometry.span, places=7)
+
+        obj = wing_obj(foil, geometry, span_sections=17)
+        z_coordinates = [
+            float(line.split()[3]) for line in obj.splitlines() if line.startswith("v ")
+        ]
+        self.assertGreater(max(z_coordinates), 0.30)
+
     def test_structure_is_a_true_off_switch_and_runs_when_enabled(self):
         conditions = sample_conditions(self.geometry)
         disabled = analyze_structure(
@@ -114,6 +160,89 @@ class AdvancedAnalysisTests(unittest.TestCase):
             settings=HydroSettings(enabled=True, submergence_depth_m=0.02),
         )
         self.assertTrue(shallow_fast["free_surface_risk"])
+
+    def test_panel_cavitation_map_reports_area_span_and_sensitivity(self):
+        water = FLUID_PRESETS["fresh_water"]
+        raw_panels = []
+        for index, (y0, y1, cp, component) in enumerate(
+            (
+                (0.0, 0.6, -0.10, "main_wing"),
+                (0.6, 1.2, -1.10, "main_wing"),
+                (-0.6, 0.0, -0.15, "main_wing"),
+                (-1.2, -0.6, -1.25, "winglet"),
+            )
+        ):
+            raw_panels.append(
+                {
+                    "panel_index": index,
+                    "wing_index": 0,
+                    "surface_index": index,
+                    "surface": "mid",
+                    "component": component,
+                    "side": "right" if y1 > 0 else "left",
+                    "x_m": 0.2,
+                    "y_m": 0.5 * (y0 + y1),
+                    "z_m": 0.1 if component == "winglet" else 0.0,
+                    "area_m2": 0.25,
+                    "cp": cp,
+                    "vertices": [
+                        [0.0, y0, 0.0],
+                        [0.4, y0, 0.0],
+                        [0.4, y1, 0.0],
+                        [0.0, y1, 0.0],
+                    ],
+                }
+            )
+        conditions = [
+            {
+                "speed_m_s": 18.0,
+                "target_cl": 0.6,
+                "point": {"cp_min": -1.25},
+                "panel_telemetry": {
+                    "thin_surfaces": True,
+                    "upper_lower_resolved": False,
+                    "cp_definition": "flow5 thin-surface panel pressure coefficient",
+                    "panels": raw_panels,
+                },
+            }
+        ]
+        report = analyze_hydro(
+            geometry=self.geometry,
+            fluid=water,
+            conditions=conditions,
+            settings=HydroSettings(
+                enabled=True,
+                constraint_mode="report_only",
+                submergence_depth_m=1.0,
+            ),
+        )
+        self.assertTrue(report["performed"])
+        self.assertTrue(report["panel_map_available"])
+        self.assertFalse(report["passed"])
+        self.assertTrue(report["constraint_passed"])
+        self.assertEqual(report["penalty"], 0.0)
+        self.assertAlmostEqual(report["risk_area_percent"], 50.0, places=8)
+        self.assertGreater(report["affected_span_bins_percent"], 0.0)
+        self.assertIn("winglet", report["panel_map"]["component_summary"])
+        self.assertEqual(len(report["speed_sensitivity"]), 5)
+        self.assertEqual(len(report["depth_sensitivity"]), 5)
+        self.assertLessEqual(
+            report["depth_sensitivity"][-1]["maximum_utilization"],
+            report["depth_sensitivity"][0]["maximum_utilization"],
+        )
+        hard_report = analyze_hydro(
+            geometry=self.geometry,
+            fluid=water,
+            conditions=conditions,
+            settings=HydroSettings(
+                enabled=True,
+                constraint_mode="hard",
+                submergence_depth_m=1.0,
+            ),
+        )
+        self.assertFalse(hard_report["passed"])
+        self.assertFalse(hard_report["constraint_passed"])
+        self.assertGreater(hard_report["penalty"], 0.0)
 
     def test_runner_cache_reuses_identical_solver_evaluation(self):
         old = os.environ.get("AEROPT_ALLOW_TEST_DOUBLE")

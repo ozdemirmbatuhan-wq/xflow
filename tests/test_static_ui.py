@@ -31,8 +31,55 @@ class StaticUiContractTests(unittest.TestCase):
             "budgetEscalation",
             "budgetPanel",
             "flow5WingOptimizer",
+            "wingletOptimization",
+            "wingletFields",
+            "wingletHeightMin",
+            "wingletHeightMax",
+            "wingletCantMin",
+            "wingletCantMax",
+            "wingletToeMin",
+            "wingletToeMax",
+            "wingletTaperMin",
+            "wingletTaperMax",
+            "flow5WingletBudget",
+            "hydroConstraintMode",
+            "cavitationPanel",
+            "cavitationMap",
+            "cavitationSpanChart",
+            "cavitationSpeedChart",
+            "cavitationDepthChart",
         ):
             self.assertIn(f'id="{identifier}"', html)
+
+    def test_winglet_controls_are_serialized_and_comparison_is_rendered(self):
+        javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        for field in (
+            "winglet_optimization_enabled",
+            "winglet_height_min_m",
+            "winglet_height_max_m",
+            "winglet_cant_min_deg",
+            "winglet_cant_max_deg",
+            "winglet_toe_min_deg",
+            "winglet_toe_max_deg",
+            "winglet_taper_min",
+            "winglet_taper_max",
+            "flow5_winglet_candidate_budget",
+        ):
+            self.assertIn(field, javascript)
+        self.assertIn("result.winglet_comparison", javascript)
+        self.assertIn("Winglet optimum", javascript)
+
+    def test_cavitation_map_controls_and_extended_timeout_are_wired(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        timeout = re.search(r'<input\b[^>]*id="flow5Timeout"[^>]*>', html)
+        self.assertIsNotNone(timeout)
+        self.assertIn('max="21600"', timeout.group(0))
+        self.assertIn('value="report_only"', html)
+        self.assertIn("constraint_mode", javascript)
+        self.assertIn("function renderCavitation", javascript)
+        self.assertIn("result.hydro_analysis", javascript)
+        self.assertIn("Kavitasyon haritası · JSON", javascript)
 
     def test_foil_and_wing_workflows_are_selectable_and_reusable(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")

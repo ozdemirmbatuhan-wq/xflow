@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 import io
 import json
 import os
@@ -9,6 +10,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 import zipfile
+from xml.etree import ElementTree as ET
 
 from aeropt.pipeline import InputError, run_design
 from aeropt.flow5 import _hidden_subprocess_kwargs
@@ -111,9 +113,11 @@ class Flow5NativePipelineTests(unittest.TestCase):
             self.assertIn("aeropt-validation.json", archive.namelist())
             self.assertIn("aeropt-pareto.json", archive.namelist())
             self.assertIn("aeropt-diagnostics.json", archive.namelist())
+            self.assertNotIn("aeropt-cavitation.json", archive.namelist())
             self.assertEqual(
                 archive.read("aeropt-optimized.fl5"), b"FLOW5_TEST_DOUBLE_PROJECT\x00"
             )
+        self.assertNotIn("cavitation_json", exports)
 
     def test_sixteen_core_budget_avoids_outer_inner_oversubscription(self):
         foil_meta = self.result["airfoil_optimization"]
@@ -203,6 +207,18 @@ class Flow5NativePipelineTests(unittest.TestCase):
         self.assertEqual(options["startupinfo"].dwFlags & 1, 1)
         self.assertEqual(options["startupinfo"].wShowWindow, 0)
 
+    def test_bridge_uses_the_pinned_flow5_757_cp_storage_contract(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "flow5_bridge" / "main.cpp"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "std::min(wing->nPanel4(), wingOpp.m_nPanel4)", source
+        )
+        self.assertIn("wingOpp.m_dCp[local]", source)
+        self.assertNotIn("wingOpp.m_dCp.size()", source)
+        self.assertIn("panel.index() * 3", source)
+        self.assertIn('"panel_telemetry"', source)
+
     def test_foil_only_result_can_feed_a_fixed_foil_wing_optimization(self):
         common = {
             "flow": {
@@ -260,6 +276,173 @@ class Flow5NativePipelineTests(unittest.TestCase):
         self.assertEqual(wing_result["airfoil_optimization"]["candidates_evaluated"], 1)
         self.assertEqual(wing_result["solver_run"]["foil_optimizer"], "skipped_fixed_airfoil")
         self.assertFalse(wing_result["coupled_design"]["enabled"])
+
+    def test_optional_winglet_stage_compares_against_planar_optimum(self):
+        request = {
+            "workflow": {"mode": "wing_only"},
+            "flow": {
+                "speed_m_s": 18.0,
+                "speed_min_m_s": 18.0,
+                "speed_max_m_s": 18.0,
+                "speed_samples": 1,
+                "target_lift_n": 40.0,
+            },
+            "airfoil": {"baseline_profile": "e818", "design_cl": 0.65},
+            "wing": {
+                "span_min_m": 2.0,
+                "span_max_m": 2.4,
+                "root_chord_min_m": 0.25,
+                "root_chord_max_m": 0.55,
+                "winglet_optimization_enabled": True,
+                "winglet_height_min_m": 0.16,
+                "winglet_height_max_m": 0.32,
+                "winglet_cant_min_deg": 72.0,
+                "winglet_cant_max_deg": 90.0,
+                "winglet_toe_min_deg": -2.0,
+                "winglet_toe_max_deg": 2.0,
+                "winglet_taper_min": 0.40,
+                "winglet_taper_max": 0.75,
+            },
+            "solver": {
+                "airfoil_strategy": "flow5_native",
+                "flow5_runner_path": str(FAKE_RUNNER),
+                "flow5_threads": 16,
+                "flow5_wing_candidate_budget": 8,
+                "flow5_winglet_candidate_budget": 8,
+                "flow5_finalists": 1,
+                "flow5_alpha_step_search_deg": 2.0,
+                "flow5_alpha_step_final_deg": 1.0,
+                "flow5_search_half_span_panels": 10,
+                "flow5_final_half_span_panels": 14,
+                "flow5_convergence_half_span_panels": 18,
+                "flow5_budget_escalation_enabled": False,
+                "flow5_surrogate_enabled": False,
+                "flow5_mesh_convergence_enabled": False,
+                "flow5_checkpoint_enabled": False,
+                "seed": 31,
+            },
+            "hydro": {"enabled": False},
+        }
+        old_value = os.environ.get("AEROPT_ALLOW_TEST_DOUBLE")
+        os.environ["AEROPT_ALLOW_TEST_DOUBLE"] = "1"
+        try:
+            result = run_design(request)
+        finally:
+            if old_value is None:
+                os.environ.pop("AEROPT_ALLOW_TEST_DOUBLE", None)
+            else:
+                os.environ["AEROPT_ALLOW_TEST_DOUBLE"] = old_value
+
+        comparison = result["winglet_comparison"]
+        self.assertTrue(comparison["enabled"])
+        self.assertTrue(comparison["performed"])
+        self.assertEqual(
+            comparison["selection"], result["solver_run"]["winglet_selection"]
+        )
+        self.assertFalse(comparison["planar"]["geometry"]["winglet_active"])
+        self.assertTrue(comparison["winglet"]["geometry"]["winglet_active"])
+        self.assertTrue(comparison["same_projected_span_and_target_lift"])
+        self.assertTrue(comparison["frozen_planar_geometry"])
+        self.assertEqual(
+            comparison["optimized_variables"], ["height", "cant", "toe", "taper"]
+        )
+        for key in (
+            "span",
+            "root_chord",
+            "taper",
+            "sweep_deg",
+            "tip_twist_deg",
+            "mid_chord_factor",
+            "mid_twist_deg",
+        ):
+            self.assertAlmostEqual(
+                comparison["planar"]["geometry"][key],
+                comparison["winglet"]["geometry"][key],
+                places=10,
+            )
+        self.assertIn("drag_percent", comparison["delta_winglet_vs_planar"])
+        self.assertEqual(
+            result["wing"]["geometry"]["winglet_active"],
+            comparison["selection"] == "winglet",
+        )
+        exported = ET.fromstring(
+            result["exports"]["plane_xml"].replace("<!DOCTYPE flow5>", "")
+        )
+        expected_sections = 4 if comparison["selection"] == "winglet" else 3
+        self.assertEqual(len(exported.findall(".//Section")), expected_sections)
+        json.dumps(result, allow_nan=False)
+
+    def test_finalist_panel_cavitation_map_is_exported_without_blocking_ld(self):
+        request = {
+            "workflow": {"mode": "wing_only"},
+            "flow": {
+                "fluid": "fresh_water",
+                "speed_m_s": 18.0,
+                "speed_min_m_s": 18.0,
+                "speed_max_m_s": 18.0,
+                "speed_samples": 1,
+                "target_lift_n": 400.0,
+            },
+            "airfoil": {"baseline_profile": "e818", "design_cl": 0.65},
+            "solver": {
+                "airfoil_strategy": "flow5_native",
+                "flow5_runner_path": str(FAKE_RUNNER),
+                "flow5_threads": 4,
+                "flow5_wing_candidate_budget": 8,
+                "flow5_finalists": 1,
+                "flow5_alpha_step_search_deg": 2.0,
+                "flow5_alpha_step_final_deg": 1.0,
+                "flow5_budget_escalation_enabled": False,
+                "flow5_surrogate_enabled": False,
+                "flow5_mesh_convergence_enabled": False,
+                "flow5_checkpoint_enabled": False,
+                "seed": 41,
+            },
+            "hydro": {
+                "enabled": True,
+                "constraint_mode": "report_only",
+                "submergence_depth_m": 1.0,
+            },
+        }
+        old_value = os.environ.get("AEROPT_ALLOW_TEST_DOUBLE")
+        os.environ["AEROPT_ALLOW_TEST_DOUBLE"] = "1"
+        try:
+            result = run_design(request)
+            disabled_request = deepcopy(request)
+            disabled_request["hydro"]["enabled"] = False
+            without_hydro = run_design(disabled_request)
+        finally:
+            if old_value is None:
+                os.environ.pop("AEROPT_ALLOW_TEST_DOUBLE", None)
+            else:
+                os.environ["AEROPT_ALLOW_TEST_DOUBLE"] = old_value
+
+        hydro = result["hydro_analysis"]
+        self.assertTrue(hydro["performed"])
+        self.assertTrue(hydro["panel_map_available"])
+        self.assertEqual(hydro["constraint_mode"], "report_only")
+        self.assertTrue(hydro["constraint_passed"])
+        self.assertEqual(hydro["penalty"], 0.0)
+        self.assertEqual(result["wing"]["geometry"], without_hydro["wing"]["geometry"])
+        self.assertAlmostEqual(result["wing"]["ld"], without_hydro["wing"]["ld"], places=12)
+        self.assertAlmostEqual(
+            result["wing_optimization"]["objective"],
+            without_hydro["wing_optimization"]["objective"],
+            places=12,
+        )
+        self.assertGreater(hydro["panel_map"]["panel_count"], 0)
+        self.assertTrue(hydro["panel_map"]["panels"][0]["vertices"])
+        self.assertEqual(len(hydro["speed_sensitivity"]), 5)
+        self.assertTrue(
+            result["wing_optimization"]["solver_telemetry"]["panel_map_available"]
+        )
+        exports = result["exports"]
+        exported = json.loads(exports["cavitation_json"])
+        self.assertTrue(exported["panel_map_available"])
+        bundle = base64.b64decode(exports["flow5_bundle_base64"])
+        with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+            self.assertIn("aeropt-cavitation.json", archive.namelist())
+        json.dumps(result, allow_nan=False)
 
 
 if __name__ == "__main__":

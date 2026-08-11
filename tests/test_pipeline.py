@@ -2,10 +2,17 @@ import json
 import base64
 import io
 import unittest
+from unittest.mock import patch
 import zipfile
 from xml.etree import ElementTree as ET
 
-from aeropt.pipeline import DEFAULT_REQUEST, InputError, run_design
+from aeropt.pipeline import (
+    DEFAULT_REQUEST,
+    InputError,
+    _fluid_from_input,
+    _merge_defaults,
+    run_design,
+)
 
 
 class PipelineTests(unittest.TestCase):
@@ -79,6 +86,8 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(DEFAULT_REQUEST["solver"]["flow5_surrogate_enabled"])
         self.assertTrue(DEFAULT_REQUEST["solver"]["flow5_checkpoint_enabled"])
         self.assertEqual(DEFAULT_REQUEST["solver"]["flow5_wing_optimizer"], "nsga2")
+        self.assertFalse(DEFAULT_REQUEST["wing"]["winglet_optimization_enabled"])
+        self.assertEqual(DEFAULT_REQUEST["solver"]["flow5_winglet_candidate_budget"], 48)
         self.assertTrue(DEFAULT_REQUEST["solver"]["flow5_budget_escalation_enabled"])
         self.assertEqual(DEFAULT_REQUEST["solver"]["flow5_budget_maximum_multiplier"], 4.0)
         self.assertEqual(
@@ -88,6 +97,46 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(DEFAULT_REQUEST["solver"]["flow5_multi_seed_runs"], 1)
         self.assertTrue(DEFAULT_REQUEST["validation"]["enabled"])
         self.assertFalse(DEFAULT_REQUEST["structure"]["enabled"])
+        self.assertEqual(DEFAULT_REQUEST["hydro"]["constraint_mode"], "hard")
+
+    def test_flow5_candidate_timeout_accepts_six_hours_and_rejects_more(self):
+        with (
+            patch(
+                "aeropt.pipeline.resolve_flow5_runner_path",
+                return_value=__file__,
+            ),
+            patch(
+                "aeropt.pipeline.run_flow5_native_design",
+                return_value={},
+            ) as native_run,
+        ):
+            run_design(
+                {
+                    "workflow": {"mode": "foil_only"},
+                    "solver": {"flow5_timeout_seconds": 21600},
+                }
+            )
+        self.assertEqual(native_run.call_args.kwargs["settings"].timeout_seconds, 21600)
+        with self.assertRaises(InputError):
+            run_design(
+                {
+                    "workflow": {"mode": "foil_only"},
+                    "solver": {"flow5_timeout_seconds": 21601},
+                }
+            )
+
+    def test_fluid_preset_properties_are_used_when_json_omits_editable_fields(self):
+        request = _merge_defaults({"flow": {"fluid": "sea_water"}})
+        fluid = _fluid_from_input(request["flow"])
+        self.assertEqual(fluid.density, 1025.0)
+        self.assertEqual(fluid.dynamic_viscosity, 1.188e-3)
+        self.assertEqual(fluid.speed_of_sound, 1500.0)
+
+        overridden = _merge_defaults(
+            {"flow": {"fluid": "sea_water", "density_kg_m3": 1030.0}}
+        )
+        self.assertEqual(overridden["flow"]["density_kg_m3"], 1030.0)
+        self.assertEqual(overridden["flow"]["dynamic_viscosity_pa_s"], 1.188e-3)
 
 
 if __name__ == "__main__":
