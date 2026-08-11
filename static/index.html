@@ -107,6 +107,26 @@
                 <div class="range-pair"><label>Min<input id="midTwistMin" type="number" min="-12" max="8" step="any" value="-4"></label><span>—</span><label>Max<input id="midTwistMax" type="number" min="-12" max="8" step="any" value="1"></label></div>
               </div>
             </div>
+            <label class="switch-row"><input id="wingletOptimization" type="checkbox"><span></span><b>Winglet tasarımını karşılaştır</b><em>önce planar optimum, sonra flow5 winglet</em></label>
+            <div id="wingletFields" class="disabled-fields">
+              <div class="range-block">
+                <span class="range-label">Winglet yüksekliği <em>m · dikey bileşen</em></span>
+                <div class="range-pair"><label>Min<input id="wingletHeightMin" type="number" min="0.005" max="10" step="any" value="0.05"></label><span>—</span><label>Max<input id="wingletHeightMax" type="number" min="0.005" max="10" step="any" value="0.40"></label></div>
+              </div>
+              <div class="range-block">
+                <span class="range-label">Winglet cant <em>° · 90° dikey</em></span>
+                <div class="range-pair"><label>Min<input id="wingletCantMin" type="number" min="45" max="90" step="any" value="60"></label><span>—</span><label>Max<input id="wingletCantMax" type="number" min="45" max="90" step="any" value="90"></label></div>
+              </div>
+              <div class="range-block">
+                <span class="range-label">Winglet toe/twist düzeltmesi <em>°</em></span>
+                <div class="range-pair"><label>Min<input id="wingletToeMin" type="number" min="-10" max="10" step="any" value="-3"></label><span>—</span><label>Max<input id="wingletToeMax" type="number" min="-10" max="10" step="any" value="3"></label></div>
+              </div>
+              <div class="range-block">
+                <span class="range-label">Winglet taper <em>c<sub>tip</sub>/c<sub>junction</sub></em></span>
+                <div class="range-pair"><label>Min<input id="wingletTaperMin" type="number" min="0.1" max="1.2" step="any" value="0.30"></label><span>—</span><label>Max<input id="wingletTaperMax" type="number" min="0.1" max="1.2" step="any" value="1"></label></div>
+              </div>
+              <p class="solver-help">Toplam izdüşüm açıklığı sabit tutulur. Winglet, ana kanadın ucuna dördüncü yüksek-dihedral flow5 kesiti olarak eklenir; bağlantı filleti ve yerel gerilme daha sonra CFD/FEA ile doğrulanmalıdır.</p>
+            </div>
           </section>
 
           <section id="profileEnvelopeSection" class="form-section">
@@ -159,6 +179,7 @@
                 <div class="field-grid two">
                   <div class="field"><label for="flow5FoilBudget">Foil başlangıç bütçesi</label><input id="flow5FoilBudget" type="number" min="8" max="4096" step="1" value="48"></div>
                   <div class="field"><label for="flow5WingBudget">Kanat başlangıç bütçesi</label><input id="flow5WingBudget" type="number" min="8" max="2048" step="1" value="48"></div>
+                  <div class="field"><label for="flow5WingletBudget">Winglet başlangıç bütçesi</label><input id="flow5WingletBudget" type="number" min="8" max="2048" step="1" value="48"></div>
                   <div class="field"><label for="flow5SearchMethod">Kanat arama yöntemi</label><select id="flow5SearchMethod"><option value="LLT">LLT</option><option value="VLM1">VLM1</option><option value="VLM2" selected>VLM2</option><option value="TRIUNIFORM">TRIUNIFORM</option></select></div>
                   <div class="field"><label for="flow5FinalMethod">Son doğrulama</label><select id="flow5FinalMethod"><option value="VLM2">VLM2</option><option value="QUADS">QUADS</option><option value="TRIUNIFORM" selected>TRIUNIFORM</option><option value="TRILINEAR">TRILINEAR</option></select></div>
                   <div class="field"><label for="flow5Finalists">Panel finalisti</label><input id="flow5Finalists" type="number" min="1" max="8" step="1" value="3"></div>
@@ -167,7 +188,7 @@
                   <div class="field"><label for="flow5SearchStep">Arama α adımı <em>°</em></label><input id="flow5SearchStep" type="number" min="0.25" max="5" step="any" value="2"></div>
                   <div class="field"><label for="flow5FinalStep">Final α adımı <em>°</em></label><input id="flow5FinalStep" type="number" min="0.1" max="2" step="any" value="0.5"></div>
                   <div class="field"><label for="flow5Ncrit">XFoil Ncrit</label><input id="flow5Ncrit" type="number" min="1" max="20" step="any" value="9"></div>
-                  <div class="field"><label for="flow5Timeout">Aday zaman aşımı <em>s</em></label><input id="flow5Timeout" type="number" min="30" max="7200" step="1" value="900"></div>
+                  <div class="field"><label for="flow5Timeout">Aday zaman aşımı <em>s · maks. 6 saat</em></label><input id="flow5Timeout" type="number" min="30" max="21600" step="1" value="900"></div>
                 </div>
                 <div class="field-grid two">
                   <div class="field"><label for="flow5XtrTop">Üst geçiş x/c</label><input id="flow5XtrTop" type="number" min="0.01" max="1" step="any" value="1"></div>
@@ -274,6 +295,7 @@
               <label class="switch-row primary-switch"><input id="hydroEnabled" type="checkbox" checked><span></span><b>Su akışında kavitasyonu denetle</b><em>havada uygulanmaz</em></label>
               <div id="hydroFields">
                 <div class="field-grid two">
+                  <div class="field full"><label for="hydroConstraintMode">Kavitasyonun seçime etkisi</label><select id="hydroConstraintMode"><option value="hard">Sert kısıt · ihlal eden tasarımı ele</option><option value="report_only">Yalnız raporla · L/D seçimini değiştirme</option></select></div>
                   <div class="field"><label for="submergenceDepth">Batma derinliği <em>m</em></label><input id="submergenceDepth" type="number" min="0.001" step="any" value="1"></div>
                   <div class="field"><label for="ambientPressure">Ortam basıncı <em>Pa</em></label><input id="ambientPressure" type="number" min="100" step="any" value="101325"></div>
                   <div class="field"><label for="vaporPressure">Buhar basıncı <em>Pa</em></label><input id="vaporPressure" type="number" min="0" step="any" value="1705"></div>
@@ -341,6 +363,20 @@
           <article id="xfoilPanel" class="panel validation-panel hidden"><header><div><span class="panel-kicker">ÇÖZÜCÜ KAYNAĞI</span><h3 id="solverSummaryTitle">flow5 analiz zinciri</h3></div><span id="xfoilStatusTag" class="mono-tag"></span></header><div id="xfoilSummary"></div></article>
 
           <article id="engineeringPanel" class="panel validation-panel hidden"><header><div><span class="panel-kicker">MÜHENDİSLİK ÖN TARAMASI</span><h3>Yapı, rijitlik ve hidrofoil</h3></div><span id="engineeringStatusTag" class="mono-tag"></span></header><div id="engineeringSummary"></div></article>
+
+          <article id="cavitationPanel" class="panel cavitation-panel hidden">
+            <header><div><span class="panel-kicker">KAVİTASYON RİSK HARİTASI</span><h3>Finalist kanadın panel-bazlı taraması ve etki göstergeleri</h3></div><span id="cavitationStatusTag" class="mono-tag"></span></header>
+            <div id="cavitationMetrics" class="cavitation-metrics"></div>
+            <div class="cavitation-visual-grid">
+              <section><h4>3B panel haritası</h4><div id="cavitationMap" class="cavitation-map"></div></section>
+              <section><h4>Açıklık boyunca en kötü kullanım</h4><div id="cavitationSpanChart" class="cavitation-chart"></div></section>
+            </div>
+            <div class="cavitation-sensitivity-grid">
+              <section><h4>Hız duyarlılığı · riskli alan</h4><div id="cavitationSpeedChart" class="cavitation-chart compact"></div></section>
+              <section><h4>Batma derinliği duyarlılığı · riskli alan</h4><div id="cavitationDepthChart" class="cavitation-chart compact"></div></section>
+            </div>
+            <p id="cavitationModelNote" class="report-note"></p>
+          </article>
 
           <div class="analysis-grid">
             <article id="validationPanel" class="panel validation-panel hidden"><header><div><span class="panel-kicker">DOĞRULAMA / REGRESYON</span><h3>Sonuç sözleşmesi</h3></div><span id="validationStatusTag" class="mono-tag"></span></header><div id="validationSummary" class="check-list"></div></article>

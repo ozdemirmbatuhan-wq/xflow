@@ -102,6 +102,15 @@ async function collectRequest() {
       mid_chord_factor_max: numberValue("midChordFactorMax"),
       mid_twist_min_deg: numberValue("midTwistMin"),
       mid_twist_max_deg: numberValue("midTwistMax"),
+      winglet_optimization_enabled: $("wingletOptimization").checked,
+      winglet_height_min_m: numberValue("wingletHeightMin"),
+      winglet_height_max_m: numberValue("wingletHeightMax"),
+      winglet_cant_min_deg: numberValue("wingletCantMin"),
+      winglet_cant_max_deg: numberValue("wingletCantMax"),
+      winglet_toe_min_deg: numberValue("wingletToeMin"),
+      winglet_toe_max_deg: numberValue("wingletToeMax"),
+      winglet_taper_min: numberValue("wingletTaperMin"),
+      winglet_taper_max: numberValue("wingletTaperMax"),
     },
     solver: {
       quality: $("quality").value,
@@ -113,6 +122,7 @@ async function collectRequest() {
       flow5_timeout_seconds: numberValue("flow5Timeout"),
       flow5_foil_candidate_budget: numberValue("flow5FoilBudget"),
       flow5_wing_candidate_budget: numberValue("flow5WingBudget"),
+      flow5_winglet_candidate_budget: numberValue("flow5WingletBudget"),
       flow5_finalists: numberValue("flow5Finalists"),
       flow5_search_method: $("flow5SearchMethod").value,
       flow5_final_method: $("flow5FinalMethod").value,
@@ -181,6 +191,7 @@ async function collectRequest() {
     },
     hydro: {
       enabled: $("hydroEnabled").checked,
+      constraint_mode: $("hydroConstraintMode").value,
       submergence_depth_m: numberValue("submergenceDepth"),
       ambient_pressure_pa: numberValue("ambientPressure"),
       vapor_pressure_pa: numberValue("vaporPressure"),
@@ -221,6 +232,14 @@ function applyDefaults(data) {
     maxBending: data.wing.max_root_bending_moment_nm, quality: data.solver.quality,
     midChordFactorMin: data.wing.mid_chord_factor_min, midChordFactorMax: data.wing.mid_chord_factor_max,
     midTwistMin: data.wing.mid_twist_min_deg, midTwistMax: data.wing.mid_twist_max_deg,
+    wingletHeightMin: data.wing.winglet_height_min_m,
+    wingletHeightMax: data.wing.winglet_height_max_m,
+    wingletCantMin: data.wing.winglet_cant_min_deg,
+    wingletCantMax: data.wing.winglet_cant_max_deg,
+    wingletToeMin: data.wing.winglet_toe_min_deg,
+    wingletToeMax: data.wing.winglet_toe_max_deg,
+    wingletTaperMin: data.wing.winglet_taper_min,
+    wingletTaperMax: data.wing.winglet_taper_max,
     seed: data.solver.seed, modes: data.solver.lifting_line_modes,
     airfoilStrategy: data.solver.airfoil_strategy, xfoilPath: data.solver.xfoil_path,
     flow5RunnerPath: data.solver.flow5_runner_path,
@@ -228,6 +247,7 @@ function applyDefaults(data) {
     flow5Timeout: data.solver.flow5_timeout_seconds,
     flow5FoilBudget: data.solver.flow5_foil_candidate_budget,
     flow5WingBudget: data.solver.flow5_wing_candidate_budget,
+    flow5WingletBudget: data.solver.flow5_winglet_candidate_budget,
     flow5Finalists: data.solver.flow5_finalists,
     flow5SearchMethod: data.solver.flow5_search_method,
     flow5FinalMethod: data.solver.flow5_final_method,
@@ -278,6 +298,7 @@ function applyDefaults(data) {
     maxTipDeflection: data.structure.max_tip_deflection_percent_semispan,
     maxElasticTwist: data.structure.max_elastic_twist_deg,
     submergenceDepth: data.hydro.submergence_depth_m,
+    hydroConstraintMode: data.hydro.constraint_mode,
     ambientPressure: data.hydro.ambient_pressure_pa,
     vaporPressure: data.hydro.vapor_pressure_pa,
     cavitationSafetyFactor: data.hydro.cavitation_safety_factor,
@@ -291,6 +312,7 @@ function applyDefaults(data) {
   Object.entries(map).forEach(([id, value]) => { $(id).value = value; });
   const checks = {
     multiSectionGeometry: data.wing.multi_section_geometry_enabled,
+    wingletOptimization: data.wing.winglet_optimization_enabled,
     spanwiseFoilOptimization: data.solver.flow5_spanwise_airfoil_optimization_enabled,
     meshConvergence: data.solver.flow5_mesh_convergence_enabled,
     evaluationCache: data.solver.flow5_cache_enabled,
@@ -381,7 +403,8 @@ function svgLineChart(container, points, xKey, yKey, options = {}) {
     grid += `<text class="axis-label" x="${gx}" y="${height-10}" text-anchor="middle">${fmt(value, options.xDigits ?? 1)}</text>`;
   }
   let reference = "";
-  if (Number.isFinite(options.referenceX)) reference = `<line class="reference-line" x1="${sx(options.referenceX)}" x2="${sx(options.referenceX)}" y1="${pad.t}" y2="${height-pad.b}"/>`;
+  if (Number.isFinite(options.referenceX)) reference += `<line class="reference-line" x1="${sx(options.referenceX)}" x2="${sx(options.referenceX)}" y1="${pad.t}" y2="${height-pad.b}"/>`;
+  if (Number.isFinite(options.referenceY) && options.referenceY >= ymin && options.referenceY <= ymax) reference += `<line class="reference-line" x1="${pad.l}" x2="${width-pad.r}" y1="${sy(options.referenceY)}" y2="${sy(options.referenceY)}"/>`;
   const area = `${path} L${sx(xs[xs.length-1])},${height-pad.b} L${sx(xs[0])},${height-pad.b} Z`;
   container.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(options.label || "çizgi grafik")}"><defs><linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ed693e" stop-opacity=".32"/><stop offset="1" stop-color="#ed693e" stop-opacity="0"/></linearGradient></defs>${grid}${reference}<path class="data-area" d="${area}"/><path class="data-line" d="${path}"/></svg>`;
 }
@@ -399,32 +422,85 @@ function renderFoil(result) {
 
 function renderPlanform(result) {
   const g = result.wing.geometry; const foil = result.airfoil_coordinates; const width = 520, height = 190;
-  const half = g.span / 2; const root = g.root_chord;
+  const half = g.span / 2; const root = g.root_chord; const mainHalf = Number(g.main_semispan ?? half);
+  const winglet = Boolean(g.winglet_active && Number(g.winglet_height) > 0);
   const midChord = Number(g.mid_chord ?? .5*(g.root_chord+g.tip_chord));
   const midTwist = Number(g.effective_mid_twist_deg ?? .5*g.tip_twist_deg);
   const chordAt = (eta) => eta <= .5 ? root + 2*eta*(midChord-root) : midChord + 2*(eta-.5)*(g.tip_chord-midChord);
   const twistAt = (eta) => eta <= .5 ? 2*eta*midTwist : midTwist + 2*(eta-.5)*(g.tip_twist_deg-midTwist);
-  const sectionPoint = (fraction, xc, zc) => {
-    const eta = Math.abs(fraction); const chord = chordAt(eta);
-    const xOffset = .25*root + eta*half*Math.tan(g.sweep_deg*Math.PI/180) - .25*chord;
+  const mainPoint = (side, eta, xc, zc) => {
+    const chord = chordAt(eta);
+    const xOffset = .25*root + eta*mainHalf*Math.tan(g.sweep_deg*Math.PI/180) - .25*chord;
     const twist = twistAt(eta) * Math.PI / 180;
     const xq = (xc-.25)*chord, z = zc*chord;
-    return [xOffset + .25*chord + xq*Math.cos(twist) + z*Math.sin(twist), fraction*half, -xq*Math.sin(twist) + z*Math.cos(twist)];
+    return [xOffset + .25*chord + xq*Math.cos(twist) + z*Math.sin(twist), side*eta*mainHalf, -xq*Math.sin(twist) + z*Math.cos(twist)];
   };
-  const project = ([x,y,z]) => [width*.48 + y/half*width*.39 + x/root*width*.105, height*.47 + x/root*height*.24 - z/root*height*1.08];
+  const wingletPoint = (side, fraction, xc, zc) => {
+    const cant = Number(g.winglet_cant_deg) * Math.PI / 180;
+    const length = Number(g.winglet_developed_length); const distance = fraction*length;
+    const rootChord = Number(g.winglet_root_chord ?? g.tip_chord);
+    const tipChord = Number(g.winglet_tip_chord ?? rootChord);
+    const chord = rootChord + fraction*(tipChord-rootChord);
+    const rootOffset = Number(g.tip_le_offset); const tipOffset = Number(g.winglet_tip_le_offset ?? rootOffset);
+    const xOffset = rootOffset + fraction*(tipOffset-rootOffset);
+    const twist = (Number(g.tip_twist_deg) + fraction*Number(g.winglet_toe_deg || 0))*Math.PI/180;
+    const xq = (xc-.25)*chord, z = zc*chord;
+    const xr = xq*Math.cos(twist) + z*Math.sin(twist);
+    const normal = -xq*Math.sin(twist) + z*Math.cos(twist);
+    return [
+      xOffset + .25*chord + xr,
+      side*(mainHalf + distance*Math.cos(cant)) - side*Math.sin(cant)*normal,
+      distance*Math.sin(cant) + Math.cos(cant)*normal,
+    ];
+  };
+  const stationPoint = (station, xc, zc) => station.kind === "winglet"
+    ? wingletPoint(station.side, station.fraction, xc, zc)
+    : mainPoint(station.side, station.fraction, xc, zc);
+  const zScale = Math.max(root, Number(g.winglet_height || 0)*1.35, .05);
+  const project = ([x,y,z]) => [width*.48 + y/half*width*.39 + x/root*width*.105, height*.62 + x/root*height*.18 - z/zScale*height*.42];
   const linePath = (points) => points.map((point,index) => { const [u,v]=project(point); return `${index?"L":"M"}${u.toFixed(1)},${v.toFixed(1)}`; }).join(" ");
-  const stations = [-1,-.75,-.5,-.25,0,.25,.5,.75,1];
-  const outlineWorld = [[-1,0,0],[0,0,0],[1,0,0],[1,1,0],[0,1,0],[-1,1,0]].map(([fraction,xc,zc]) => sectionPoint(fraction,xc,zc));
-  const outline = outlineWorld.map((point) => project(point).map((value)=>value.toFixed(1)).join(",")).join(" ");
-  const sections = stations.map((fraction) => `<path class="wing-section" d="${linePath(foil.filter((_,index)=>index%3===0).map((point)=>sectionPoint(fraction,point.x_over_c,point.y_over_c)))} Z"/>`).join("");
-  const mesh = [0,.25,.5,.75,1].map((xc) => `<path class="wing-mesh" d="${linePath(stations.map((fraction)=>sectionPoint(fraction,xc,0)))}"/>`).join("");
-  $("planformChart").innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Optimize kanadın üç boyutlu izometrik görünüşü"><polygon class="wing-surface" points="${outline}"/>${mesh}${sections}</svg>`;
-  $("planformStats").innerHTML = `<div><small>Kök chord</small><strong>${fmt(g.root_chord,3)} m</strong></div><div><small>Orta chord</small><strong>${fmt(midChord,3)} m</strong></div><div><small>Uç chord</small><strong>${fmt(g.tip_chord,3)} m</strong></div><div><small>Alan</small><strong>${fmt(g.area,3)} m²</strong></div>`;
+  const mainStations = [-1,-.75,-.5,-.25,0,.25,.5,.75,1].map((fraction) => ({kind:"main",side:fraction<0?-1:1,fraction:Math.abs(fraction)}));
+  const sectionStations = [...mainStations];
+  if (winglet) sectionStations.push(
+    {kind:"winglet",side:-1,fraction:.5},{kind:"winglet",side:-1,fraction:1},
+    {kind:"winglet",side:1,fraction:.5},{kind:"winglet",side:1,fraction:1},
+  );
+  const mainOutlineWorld = [
+    mainPoint(-1,1,0,0),mainPoint(1,0,0,0),mainPoint(1,1,0,0),
+    mainPoint(1,1,1,0),mainPoint(1,0,1,0),mainPoint(-1,1,1,0),
+  ];
+  const polygon = (points, css="wing-surface") => `<polygon class="${css}" points="${points.map((point) => project(point).map((value)=>value.toFixed(1)).join(",")).join(" ")}"/>`;
+  let surfaces = polygon(mainOutlineWorld);
+  if (winglet) {
+    [-1,1].forEach((side) => { surfaces += polygon([
+      wingletPoint(side,0,0,0),wingletPoint(side,1,0,0),wingletPoint(side,1,1,0),wingletPoint(side,0,1,0),
+    ],"wing-surface winglet-surface"); });
+  }
+  const sampledFoil = foil.filter((_,index)=>index%3===0);
+  const sections = sectionStations.map((station) => `<path class="wing-section" d="${linePath(sampledFoil.map((point)=>stationPoint(station,point.x_over_c,point.y_over_c)))} Z"/>`).join("");
+  let mesh = [0,.25,.5,.75,1].map((xc) => `<path class="wing-mesh" d="${linePath(mainStations.map((station)=>stationPoint(station,xc,0)))}"/>`).join("");
+  if (winglet) [-1,1].forEach((side) => { [0,.5,1].forEach((xc) => { mesh += `<path class="wing-mesh" d="${linePath([0,.5,1].map((fraction)=>wingletPoint(side,fraction,xc,0)))}"/>`; }); });
+  $("planformChart").innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Optimize kanadın ${winglet?"wingletli ":""}üç boyutlu izometrik görünüşü">${surfaces}${mesh}${sections}</svg>`;
+  const lastStat = winglet
+    ? `<div><small>Winglet</small><strong>${fmt(g.winglet_height,3)} m · ${fmt(g.winglet_cant_deg,1)}°</strong></div>`
+    : `<div><small>Alan</small><strong>${fmt(g.area,3)} m²</strong></div>`;
+  $("planformStats").innerHTML = `<div><small>Kök chord</small><strong>${fmt(g.root_chord,3)} m</strong></div><div><small>Orta chord</small><strong>${fmt(midChord,3)} m</strong></div><div><small>Uç chord</small><strong>${fmt(g.tip_chord,3)} m</strong></div>${lastStat}`;
 }
 
 function metric(label, value, unit) { return `<div class="metric"><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong><em>${escapeHtml(unit || "")}</em></div>`; }
 
 function renderComparison(result) {
+  const winglet = result.winglet_comparison || {};
+  if (winglet.performed) {
+    const p = winglet.planar, w = winglet.winglet;
+    const selected = winglet.selection === "winglet" ? "Winglet seçildi" : "Planar seçildi";
+    const row = (label, planar, withWinglet, digits=2, unit="") => {
+      const delta = Number(withWinglet)-Number(planar);
+      return `<tr><td>${label}</td><td class="${winglet.selection==="planar"?"best":""}">${fmt(planar,digits)} ${unit}</td><td class="${winglet.selection==="winglet"?"best":""}">${fmt(withWinglet,digits)} ${unit}</td><td>${delta>=0?"+":""}${fmt(delta,digits)} ${unit}</td></tr>`;
+    };
+    $("comparisonTable").innerHTML = `<p class="solver-help"><b>${selected}</b> · aynı izdüşüm açıklığı ve taşıma hedefi · ${escapeHtml(winglet.selection_reason || "kısıtlı amaç karşılaştırması")}</p><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Planar optimum</th><th>Winglet optimum</th><th>Winglet − planar</th></tr></thead><tbody>${row("Toplam sürükleme",p.drag_n,w.drag_n,2,"N")}${row("L/D",p.ld,w.ld,1)}${row("Profil Cᴅ",p.cd_profile,w.cd_profile,5)}${row("İndüklenmiş Cᴅ",p.cd_induced,w.cd_induced,5)}${row("İndüklenmiş pay",p.induced_drag_fraction_percent,w.induced_drag_fraction_percent,1,"%")}${row("Kök eğilme momenti",p.root_bending_moment_nm,w.root_bending_moment_nm,1,"N·m")}</tbody></table>`;
+    return;
+  }
   const o = result.wing, b = result.rectangular_baseline;
   const row = (label, optimum, baseline, digits=2, unit="") => `<tr><td>${label}</td><td class="best">${fmt(optimum,digits)} ${unit}</td><td>${fmt(baseline,digits)} ${unit}</td></tr>`;
   $("comparisonTable").innerHTML = `<table class="comparison-table"><thead><tr><th>Gösterge</th><th>Optimize</th><th>Dikdörtgen</th></tr></thead><tbody>${row("Toplam sürükleme",o.drag_n,b.drag_n,2,"N")}${row("L/D",o.ld,b.ld,1)}${row("Profil Cᴅ",o.cd_profile,b.cd_profile,4)}${row("İndüklenmiş Cᴅ",o.cd_induced,b.cd_induced,4)}${row("Span verimi",o.span_efficiency,b.span_efficiency,3)}${row("Kök eğilme momenti",o.root_bending_moment_nm,b.root_bending_moment_nm,1,"N·m")}</tbody></table>`;
@@ -468,6 +544,7 @@ function renderXfoil(result) {
     const wingBudget = result.wing_optimization.budget_convergence || {};
     const multiObjective = result.wing_optimization.multi_objective || {};
     const stability = result.multi_seed_stability || {};
+    const winglet = result.winglet_comparison || {};
     const summaryRows = [
       row("Başlangıç profili", baseline.display_name || "Eppler E818"),
       row("DAT → CST uyumu", `RMS ${fmt(Number(baseline.fit_rms_over_c)*100,4)} %c`),
@@ -476,6 +553,7 @@ function renderXfoil(result) {
       row("Profil seçimi", selectionText), row("Baseline iyileşmesi", improvement == null ? "—" : fmt(improvement,2), "%"),
       row("Foil optimizeri", result.solver_run.foil_optimizer || "differential_evolution"),
       row("Kanat optimizeri", result.solver_run.wing_optimizer || "differential_evolution"),
+      row("Winglet karşılaştırması", winglet.performed ? `${winglet.selection === "winglet" ? "winglet seçildi" : "planar seçildi"} · ΔD %${fmt(winglet.delta_winglet_vs_planar?.drag_percent,2)}` : winglet.enabled ? "aşama tamamlanamadı" : "kapalı"),
       row("Kanat amaçları", multiObjective.enabled ? `${(multiObjective.objective_specs || []).length} amaç · Pareto rank + crowding` : "skaler amaç"),
       row(
         "Bağlı foil–kanat",
@@ -485,6 +563,7 @@ function renderXfoil(result) {
       row("Foil çözücüsü", analysis.foil_solver), row("Akış noktası", String(result.flow.speed_samples)),
       row("CST foil adayı", String(result.airfoil_optimization.candidates_evaluated)),
       row("Kanat adayı", String(result.wing_optimization.candidates_evaluated)),
+      row("Winglet adayı", winglet.performed ? String(winglet.winglet?.candidates_evaluated || 0) : "—"),
       row("Bütçe · foil", foilBudget.converged === true ? `${foilBudget.evaluations_completed}/${foilBudget.maximum_budget} · yeterli` : foilBudget.converged === false ? `${foilBudget.evaluations_completed}/${foilBudget.maximum_budget} · artır` : `${foilBudget.evaluations_completed || result.airfoil_optimization.candidates_evaluated} · sabit`),
       row("Bütçe · kanat", wingBudget.converged === true ? `${wingBudget.evaluations_completed}/${wingBudget.maximum_budget} · yeterli` : wingBudget.converged === false ? `${wingBudget.evaluations_completed}/${wingBudget.maximum_budget} · artır` : `${wingBudget.evaluations_completed || result.wing_optimization.candidates_evaluated} · sabit`),
       row("Kanat taraması", analysis.wing_solver_search), row("Son doğrulama", analysis.wing_solver_final),
@@ -529,15 +608,87 @@ function renderEngineering(result) {
     rows.push(row("Elastik uç twist", fmt(structure.max_elastic_twist_tip_deg,3), "°"));
     rows.push(row("Tahmini kanat malzeme kütlesi", fmt(structure.estimated_wing_material_mass_kg,3), "kg"));
   }
-  rows.push(row("Hidrofoil taraması", hydro.enabled ? (hydro.performed ? (hydro.passed ? "kavitasyon marjı var" : "kavitasyon riski") : "Cp_min yok") : "uygulanmadı / kapalı"));
+  const hydroMode = hydro.constraint_mode === "report_only" ? "yalnız rapor" : "sert kısıt";
+  rows.push(row("Hidrofoil taraması", hydro.enabled ? (hydro.performed ? `${hydro.passed ? "kavitasyon marjı var" : "kavitasyon riski"} · ${hydroMode}` : `Cp_min yok · ${hydroMode}`) : "uygulanmadı / kapalı"));
   if (hydro.enabled && hydro.performed) {
     rows.push(row("Kavitasyon kullanımı", fmt(hydro.cavitation_utilization,3)));
     rows.push(row("Minimum marj oranı", fmt(hydro.minimum_cavitation_margin_ratio,3)));
+    if (hydro.panel_map_available) rows.push(row("Riskli finalist alanı", fmt(hydro.risk_area_percent,2), "%"));
     rows.push(row("Serbest yüzey risk bayrağı", hydro.free_surface_risk ? "evet" : "hayır"));
   }
   $("engineeringSummary").innerHTML = `<table class="comparison-table validation-table"><tbody>${rows.join("")}</tbody></table>`;
   $("engineeringStatusTag").textContent = structure.enabled || hydro.enabled ? "ÖN TARAMA" : "KAPALI";
   panel.classList.remove("hidden");
+}
+
+function cavitationColor(utilization) {
+  const value = Number(utilization);
+  if (!Number.isFinite(value)) return "#aab5b0";
+  if (value >= 1) return value >= 1.25 ? "#9f3428" : "#d84d37";
+  if (value >= .8) return "#d8993b";
+  return value >= .55 ? "#55a99f" : "#0d786e";
+}
+
+function renderCavitationMap(container, map) {
+  const panels = (map?.panels || []).filter((panel) => Array.isArray(panel.vertices) && panel.vertices.length >= 3);
+  if (!panels.length) {
+    container.innerHTML = `<div class="chart-empty">Finalist panel köşe koordinatları runner tarafından döndürülmedi.</div>`;
+    return;
+  }
+  const width = 560, height = 285, pad = 18;
+  const projectRaw = (vertex) => {
+    const x = Number(vertex[0]), y = Number(vertex[1]), z = Number(vertex[2]);
+    return [y + .34*x, -.92*z + .22*x];
+  };
+  const projectedPanels = panels.map((panel) => ({ panel, points: panel.vertices.map(projectRaw) }));
+  const all = projectedPanels.flatMap((item) => item.points);
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+  all.forEach(([u,v]) => {
+    xmin = Math.min(xmin,u); xmax = Math.max(xmax,u);
+    ymin = Math.min(ymin,v); ymax = Math.max(ymax,v);
+  });
+  if (Math.abs(xmax-xmin) < 1e-12) { xmin -= 1; xmax += 1; }
+  if (Math.abs(ymax-ymin) < 1e-12) { ymin -= 1; ymax += 1; }
+  const scale = Math.min((width-2*pad)/(xmax-xmin), (height-2*pad)/(ymax-ymin));
+  const ox = (width - scale*(xmax-xmin))/2, oy = (height - scale*(ymax-ymin))/2;
+  const screen = ([u,v]) => [ox + (u-xmin)*scale, height - oy - (v-ymin)*scale];
+  projectedPanels.sort((a,b) => Number(a.panel.z_m)-Number(b.panel.z_m));
+  const shapes = projectedPanels.map(({panel,points}) => {
+    const vertices = points.map((point) => screen(point).map((value) => value.toFixed(1)).join(",")).join(" ");
+    const title = `${panel.component || "kanat"} · ${panel.surface || "yüzey"} · U=${fmt(panel.cavitation_utilization,3)} · Cp=${fmt(panel.cp,3)}`;
+    return `<polygon class="cavitation-cell ${escapeHtml(panel.risk_state || "safe")}" fill="${cavitationColor(panel.cavitation_utilization)}" points="${vertices}"><title>${escapeHtml(title)}</title></polygon>`;
+  }).join("");
+  container.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Kanadın panel bazlı kavitasyon risk haritası">${shapes}</svg><div class="cavitation-legend"><span><i class="safe"></i>Güvenli · U&lt;0,8</span><span><i class="near"></i>Sınıra yakın</span><span><i class="risk"></i>Risk · U≥1</span></div>`;
+}
+
+function renderCavitation(result) {
+  const hydro = result.hydro_analysis || {};
+  const panel = $("cavitationPanel");
+  const map = hydro.panel_map;
+  if (!hydro.enabled || !hydro.panel_map_available || !map?.available) {
+    panel.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+  const mode = hydro.constraint_mode === "report_only" ? "YALNIZ RAPOR" : "SERT KISIT";
+  $("cavitationStatusTag").textContent = `${hydro.passed ? "MARJ VAR" : "RİSK"} · ${mode}`;
+  const item = (label,value,unit="") => `<div><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong><em>${escapeHtml(unit)}</em></div>`;
+  $("cavitationMetrics").innerHTML = [
+    item("Riskli alan",fmt(hydro.risk_area_percent,2),"%"),
+    item("Sınıra yakın alan",fmt(hydro.near_risk_area_percent,2),"%"),
+    item("Fiziksel başlangıç alanı",fmt(hydro.physical_onset_area_percent,2),"%"),
+    item("Alan-ağırlıklı şiddet",fmt(hydro.cavitation_severity_index,4)),
+    item("Etkilenen izdüşümsel span",fmt(hydro.affected_projected_span_percent,1),"%"),
+    item("En kötü kullanım",fmt(map.maximum_utilization,3)),
+    item("Basınç açığı integrali",fmt(hydro.pressure_deficit_area_integral_n,2),"N"),
+    item("Kavitasyon sayısı",fmt(map.cavitation_number_sigma,3),"σ"),
+  ].join("");
+  renderCavitationMap($("cavitationMap"), map);
+  svgLineChart($("cavitationSpanChart"), map.spanwise_distribution || [], "span_fraction", "maximum_utilization", { referenceY:1, xDigits:2, yDigits:2, label:"Yarı açıklık boyunca kavitasyon kullanımı", emptyText:"Açıklık dağılımı üretilemedi." });
+  svgLineChart($("cavitationSpeedChart"), hydro.speed_sensitivity || [], "speed_m_s", "risk_area_percent", { xDigits:1, yDigits:1, label:"Hıza göre riskli alan yüzdesi", emptyText:"Hız duyarlılığı üretilemedi." });
+  svgLineChart($("cavitationDepthChart"), hydro.depth_sensitivity || [], "submergence_depth_m", "risk_area_percent", { xDigits:2, yDigits:1, label:"Batma derinliğine göre riskli alan yüzdesi", emptyText:"Derinlik duyarlılığı üretilemedi." });
+  const resolution = map.upper_lower_resolved ? "üst ve alt yüzey ayrı çözüldü" : "flow5 ince-yüzey Cp panelleri kullanıldı; üst/alt yüzey ayrı değildir";
+  $("cavitationModelNote").textContent = `${map.panel_count} finalist paneli · ${fmt(map.speed_m_s,2)} m/s · ${fmt(map.submergence_depth_m,2)} m derinlik · ${resolution}. Hız/derinlik eğrileri donmuş-Cp ön taramasıdır; gerçek kavite boyu, hacmi veya L/D kaybı çok-fazlı CFD olmadan hesaplanmaz.`;
 }
 
 function compactValue(value) {
@@ -648,10 +799,11 @@ function renderStability(result) {
 function renderBudgetConvergence(result) {
   const foil = result.airfoil_optimization?.budget_convergence;
   const wing = result.wing_optimization?.budget_convergence;
+  const winglet = result.winglet_comparison?.winglet?.budget_convergence;
   const panel = $("budgetPanel");
   if (!foil && !wing) { panel.classList.add("hidden"); return; }
   panel.classList.remove("hidden");
-  const reports = [foil, wing].filter(Boolean);
+  const reports = [foil, wing, winglet].filter(Boolean);
   const exhausted = reports.some((report) => report.status === "budget_exhausted");
   const allConverged = reports.length > 0 && reports.every((report) => report.converged === true);
   $("budgetStatusTag").textContent = exhausted ? "BÜTÇE-SINIRLI" : allConverged ? "YETERLİ" : "SABİT BÜTÇE";
@@ -661,7 +813,7 @@ function renderBudgetConvergence(result) {
     const decision = report.converged === true ? "yakınsadı" : report.converged === false ? "azami bütçede hareketli" : "otomatik karar kapalı";
     return `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(route)}</td><td class="best">${report.evaluations_completed}/${report.maximum_budget}</td><td>%${fmt(last.controlling_change_percent,3)}</td><td>${escapeHtml(decision)}</td></tr>`;
   };
-  $("budgetSummary").innerHTML = `<div class="table-scroll"><table class="comparison-table"><thead><tr><th>Aşama</th><th>Kontrol bütçeleri</th><th>Gerçek / azami</th><th>Son değişim</th><th>Karar</th></tr></thead><tbody>${foil ? row("Airfoil",foil) : ""}${wing ? row("Kanat",wing) : ""}</tbody></table></div><p class="report-note">${escapeHtml(exhausted ? "Azami bütçede Pareto/amaç hareketi toleransı aşmış; bütçeyi veya multi-seed sayısını artırın." : allConverged ? "Her iki arama da ayarlanan tolerans içinde kararlı; ayrılmamış azami bütçe kullanılmadı." : "Otomatik bütçe denetimi kapalı olduğu için yalnız girilen sabit bütçe tamamlandı.")}</p>`;
+  $("budgetSummary").innerHTML = `<div class="table-scroll"><table class="comparison-table"><thead><tr><th>Aşama</th><th>Kontrol bütçeleri</th><th>Gerçek / azami</th><th>Son değişim</th><th>Karar</th></tr></thead><tbody>${foil ? row("Airfoil",foil) : ""}${wing ? row("Kanat",wing) : ""}${winglet ? row("Winglet",winglet) : ""}</tbody></table></div><p class="report-note">${escapeHtml(exhausted ? "Azami bütçede Pareto/amaç hareketi toleransı aşmış; bütçeyi veya multi-seed sayısını artırın." : allConverged ? "Tüm etkin aramalar ayarlanan tolerans içinde kararlı; ayrılmamış azami bütçe kullanılmadı." : "Otomatik bütçe denetimi kapalı olduğu için yalnız girilen sabit bütçe tamamlandı.")}</p>`;
 }
 
 const HISTORY_KEY = "aeropt.projectHistory.v1";
@@ -685,7 +837,7 @@ function historySummary(result) {
     status: result.status, selected_seed: result.multi_seed_stability?.selected_seed ?? result.solver_run?.selected_seed ?? "—",
     validation: result.validation_report?.status || "—",
     wing: { lift_n:result.wing.lift_n, drag_n:result.wing.drag_n, ld:result.wing.ld, root_bending_moment_nm:result.wing.root_bending_moment_nm },
-    geometry: { span:geometry.span, root_chord:geometry.root_chord, taper:geometry.taper, sweep_deg:geometry.sweep_deg, tip_twist_deg:geometry.tip_twist_deg, area:geometry.area, aspect_ratio:geometry.aspect_ratio },
+    geometry: { span:geometry.span, root_chord:geometry.root_chord, taper:geometry.taper, sweep_deg:geometry.sweep_deg, tip_twist_deg:geometry.tip_twist_deg, area:geometry.area, aspect_ratio:geometry.aspect_ratio, winglet_enabled:geometry.winglet_enabled, winglet_height:geometry.winglet_height, winglet_cant_deg:geometry.winglet_cant_deg, winglet_toe_deg:geometry.winglet_toe_deg, winglet_taper:geometry.winglet_taper },
     airfoil: { max_camber:result.airfoil.max_camber, thickness:result.airfoil.thickness },
   };
 }
@@ -710,7 +862,7 @@ function renderHistory() {
   const a = items.find((item)=>item.id===$("historyA").value) || items[0];
   const b = items.find((item)=>item.id===$("historyB").value) || items[0];
   const row = (label, av, bv, digits=2, unit="") => `<tr><td>${escapeHtml(label)}</td><td class="best">${fmt(av,digits)} ${escapeHtml(unit)}</td><td>${fmt(bv,digits)} ${escapeHtml(unit)}</td><td>${fmt(Number(av)-Number(bv),digits)} ${escapeHtml(unit)}</td></tr>`;
-  $("historyComparison").innerHTML = `<div class="table-scroll"><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Tasarım A</th><th>Tasarım B</th><th>A − B</th></tr></thead><tbody>${row("L/D",a.wing.ld,b.wing.ld,1)}${row("Sürükleme",a.wing.drag_n,b.wing.drag_n,2,"N")}${row("Taşıma",a.wing.lift_n,b.wing.lift_n,1,"N")}${row("Açıklık",a.geometry.span,b.geometry.span,3,"m")}${row("Alan",a.geometry.area,b.geometry.area,3,"m²")}${row("Açıklık oranı",a.geometry.aspect_ratio,b.geometry.aspect_ratio,2)}${row("Taper",a.geometry.taper,b.geometry.taper,3)}${row("Sweep",a.geometry.sweep_deg,b.geometry.sweep_deg,2,"°")}${row("Uç twist",a.geometry.tip_twist_deg,b.geometry.tip_twist_deg,2,"°")}${row("Kök momenti",a.wing.root_bending_moment_nm,b.wing.root_bending_moment_nm,1,"N·m")}</tbody></table></div>`;
+  $("historyComparison").innerHTML = `<div class="table-scroll"><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Tasarım A</th><th>Tasarım B</th><th>A − B</th></tr></thead><tbody>${row("L/D",a.wing.ld,b.wing.ld,1)}${row("Sürükleme",a.wing.drag_n,b.wing.drag_n,2,"N")}${row("Taşıma",a.wing.lift_n,b.wing.lift_n,1,"N")}${row("Açıklık",a.geometry.span,b.geometry.span,3,"m")}${row("Alan",a.geometry.area,b.geometry.area,3,"m²")}${row("Açıklık oranı",a.geometry.aspect_ratio,b.geometry.aspect_ratio,2)}${row("Taper",a.geometry.taper,b.geometry.taper,3)}${row("Sweep",a.geometry.sweep_deg,b.geometry.sweep_deg,2,"°")}${row("Uç twist",a.geometry.tip_twist_deg,b.geometry.tip_twist_deg,2,"°")}${row("Winglet yüksekliği",a.geometry.winglet_height || 0,b.geometry.winglet_height || 0,3,"m")}${row("Winglet cant",a.geometry.winglet_cant_deg || 90,b.geometry.winglet_cant_deg || 90,1,"°")}${row("Kök momenti",a.wing.root_bending_moment_nm,b.wing.root_bending_moment_nm,1,"N·m")}</tbody></table></div>`;
 }
 
 function rememberAirfoilResult(result) {
@@ -728,7 +880,7 @@ function rememberAirfoilResult(result) {
 }
 
 function setWingResultVisibility(visible) {
-  ["planformPanel", "loadPanel", "engineeringPanel", "validationPanel", "diagnosticPanel", "paretoPanel", "stabilityPanel", "comparisonPanel", "historyPanel"]
+  ["planformPanel", "loadPanel", "engineeringPanel", "cavitationPanel", "validationPanel", "diagnosticPanel", "paretoPanel", "stabilityPanel", "comparisonPanel", "historyPanel"]
     .forEach((id) => $(id).classList.toggle("hidden", !visible));
   $("visualGrid").classList.toggle("single-column", !visible);
   $("chartGrid").classList.toggle("single-column", !visible);
@@ -807,17 +959,20 @@ function renderResult(result) {
   $("feasibilityBadge").classList.toggle("review", result.status !== "feasible");
   $("metricGrid").innerHTML = [
     metric("Gerçekleşen taşıma", fmt(wing.lift_n,1), "N"), metric("Toplam sürükleme",fmt(wing.drag_n,2),"N"),
-    metric("L / D",fmt(wing.ld,1),""), metric("Açıklık oranı",fmt(g.aspect_ratio,2),""), metric("Tasarım α",fmt(g.alpha_deg,2),"°")
+    metric("L / D",fmt(wing.ld,1),""), metric("İndüklenmiş pay",fmt(wing.induced_drag_fraction_percent ?? 100*wing.cd_induced/Math.max(wing.cd_total,1e-12),1),"%"), metric("Açıklık oranı",fmt(g.aspect_ratio,2),""), metric("Tasarım α",fmt(g.alpha_deg,2),"°")
   ].join("");
   $("foilTag").textContent = `${f.family} · Re ${sci(result.airfoil_optimization.reynolds)}`;
   $("reTag").textContent = `${result.polar_source} · M ${fmt(result.flow.mach,3)}`;
-  $("savingTag").textContent = `%${fmt(result.wing_optimization.drag_reduction_vs_rectangular_percent,1)} sürükleme farkı`;
+  $("savingTag").textContent = result.winglet_comparison?.performed
+    ? `${result.winglet_comparison.selection === "winglet" ? "WINGLET" : "PLANAR"} · ΔD %${fmt(result.winglet_comparison.delta_winglet_vs_planar?.drag_percent,1)}`
+    : `%${fmt(result.wing_optimization.drag_reduction_vs_rectangular_percent,1)} sürükleme farkı`;
   renderFoil(result); renderPlanform(result);
   svgLineChart($("polarChart"), result.polar, "alpha_deg", "cl", { referenceX: g.alpha_deg, label: "Taşıma katsayısı polar grafiği" });
   svgLineChart($("loadChart"), wing.distribution, "y_m", "lift_n_per_m", { yDigits: 1, xDigits: 2, label: "Kanat açıklığı boyunca yük dağılımı", emptyText: "Span dağılımı JSON köprüsünde yok; gerçek dağılım çözümlenmiş .fl5 projesindedir." });
   renderComparison(result);
   renderXfoil(result);
   renderEngineering(result);
+  renderCavitation(result);
   renderValidation(result);
   renderDiagnostics(result);
   renderPareto(result);
@@ -839,6 +994,7 @@ function renderResult(result) {
     ex.pareto_json ? downloadLink(ex.pareto_filename, ex.pareto_json, "application/json", "Pareto · JSON") : "",
     ex.multi_seed_json ? downloadLink(ex.multi_seed_filename, ex.multi_seed_json, "application/json", "Multi-seed · JSON") : "",
     ex.diagnostics_json ? downloadLink(ex.diagnostics_filename, ex.diagnostics_json, "application/json", "Teşhis · JSON") : "",
+    ex.cavitation_json ? downloadLink(ex.cavitation_filename, ex.cavitation_json, "application/json", "Kavitasyon haritası · JSON") : "",
     ex.flow5_project_base64 ? base64DownloadLink(ex.flow5_project_filename, ex.flow5_project_base64, "application/octet-stream", "Çözümlenmiş flow5 · FL5") : "",
     ...(ex.section_airfoils || []).map((item) => downloadLink(item.filename, item.airfoil_dat, "text/plain", `${item.station} airfoil · DAT`)),
     base64DownloadLink(ex.flow5_bundle_filename, ex.flow5_bundle_base64, "application/zip", "Tüm flow5 paketi · ZIP"),
@@ -928,6 +1084,7 @@ function toggleOptionalPanels() {
   $("structureFields").classList.toggle("disabled-fields", !$("structureEnabled").checked);
   $("hydroFields").classList.toggle("disabled-fields", !$("hydroEnabled").checked);
   $("multiSectionFields").classList.toggle("disabled-fields", !$("multiSectionGeometry").checked);
+  $("wingletFields").classList.toggle("disabled-fields", !$("wingletOptimization").checked);
   $("spanwiseFoilFields").classList.toggle("disabled-fields", !$("spanwiseFoilOptimization").checked);
   $("meshConvergenceFields").classList.toggle("disabled-fields", !$("meshConvergence").checked);
   $("surrogateFields").classList.toggle("disabled-fields", !$("surrogateEnabled").checked);
@@ -938,7 +1095,7 @@ $("airfoilStrategy").addEventListener("change", toggleSolverSettings);
 $("baselineAirfoil").addEventListener("change", toggleBaselineInput);
 $("optimizationMode").addEventListener("change", toggleWorkflowMode);
 $("wingAirfoilSource").addEventListener("change", toggleWingAirfoilSource);
-["structureEnabled","hydroEnabled","multiSectionGeometry","spanwiseFoilOptimization","meshConvergence","surrogateEnabled","budgetEscalation","validationEnabled"].forEach((id) => $(id).addEventListener("change", toggleOptionalPanels));
+["structureEnabled","hydroEnabled","multiSectionGeometry","wingletOptimization","spanwiseFoilOptimization","meshConvergence","surrogateEnabled","budgetEscalation","validationEnabled"].forEach((id) => $(id).addEventListener("change", toggleOptionalPanels));
 [$("paretoX"), $("paretoY")].forEach((element) => element.addEventListener("change", () => { if (lastResult) renderPareto(lastResult); }));
 [$("historyA"), $("historyB")].forEach((element) => element.addEventListener("change", renderHistory));
 $("clearHistory").addEventListener("click", () => {
