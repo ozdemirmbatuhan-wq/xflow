@@ -35,6 +35,9 @@
 #include <objects2d_globals.h>
 #include <objects3d.h>
 #include <panelanalysis.h>
+#include <panel.h>
+#include <panel3.h>
+#include <panel4.h>
 #include <planepolar.h>
 #include <planepolarnamemaker.h>
 #include <planetask.h>
@@ -44,6 +47,7 @@
 #include <polarnamemaker.h>
 #include <xfoiltask.h>
 #include <wingopp.h>
+#include <wingxfl.h>
 
 #ifndef AEROPT_FLOW5_VERSION
 #define AEROPT_FLOW5_VERSION "7.57"
@@ -330,6 +334,136 @@ static QJsonArray spanDistribution(const SpanDistribs &span, double dynamicPress
     return distribution;
 }
 
+static QString surfaceName(const Panel &panel)
+{
+    if (panel.isTopPanel()) return "upper";
+    if (panel.isBotPanel()) return "lower";
+    if (panel.isMidPanel()) return "mid";
+    if (panel.isSidePanel()) return "side";
+    return "other";
+}
+
+static QJsonArray vectorArray(const Vector3d &point)
+{
+    return {point.x, point.y, point.z};
+}
+
+static QJsonObject panelRecord(
+    const Panel &panel,
+    int wingIndex,
+    int surfaceCount,
+    bool wingletActive,
+    double cp,
+    const QJsonArray &vertices
+)
+{
+    const Vector3d &center = panel.CoG();
+    const Vector3d &normal = panel.normal();
+    const int surfaceIndex = panel.surfaceIndex();
+    const bool wingletPanel = wingletActive && surfaceCount > 1 &&
+        (surfaceIndex == 0 || surfaceIndex == surfaceCount - 1);
+    return {
+        {"panel_index", panel.index()},
+        {"wing_index", wingIndex},
+        {"surface_index", surfaceIndex},
+        {"surface", surfaceName(panel)},
+        {"component", wingletPanel ? "winglet" : "main_wing"},
+        {"side", center.y < -1.0e-10 ? "left" : center.y > 1.0e-10 ? "right" : "center"},
+        {"x_m", center.x},
+        {"y_m", center.y},
+        {"z_m", center.z},
+        {"nx", normal.x},
+        {"ny", normal.y},
+        {"nz", normal.z},
+        {"area_m2", panel.area()},
+        {"cp", cp},
+        {"leading_edge_panel", panel.isLeading()},
+        {"trailing_edge_panel", panel.isTrailing()},
+        {"vertices", vertices},
+    };
+}
+
+static QJsonObject panelTelemetry(
+    const PlaneXfl &plane,
+    const PlaneOpp &opp,
+    const PlanePolar &polar,
+    bool wingletActive,
+    double targetCl,
+    double sampledCl,
+    double sampledAlpha
+)
+{
+    QJsonArray panels;
+    double totalArea = 0.0;
+    for (int wingIndex = 0; wingIndex < plane.nWings(); ++wingIndex) {
+        const WingXfl *wing = plane.wingAt(wingIndex);
+        if (!wing) continue;
+        const int surfaceCount = wing->nSurfaces();
+        if (polar.isTriangleMethod()) {
+            const int first = wing->firstPanel3Index();
+            const std::vector<double> &cpValues = opp.Cp();
+            for (int local = 0; local < wing->nPanel3(); ++local) {
+                const Panel3 &panel = plane.panel3At(first + local);
+                const int cpIndex = panel.index() * 3;
+                if (cpIndex < 0 || cpIndex + 2 >= int(cpValues.size())) continue;
+                const double cp = (
+                    cpValues[std::size_t(cpIndex)] +
+                    cpValues[std::size_t(cpIndex + 1)] +
+                    cpValues[std::size_t(cpIndex + 2)]
+                ) / 3.0;
+                if (!std::isfinite(cp) || !(panel.area() > 0.0)) continue;
+                QJsonArray vertices;
+                for (int vertex = 0; vertex < 3; ++vertex)
+                    vertices.append(vectorArray(panel.vertexAt(vertex)));
+                panels.append(panelRecord(
+                    panel,
+                    wingIndex,
+                    surfaceCount,
+                    wingletActive,
+                    cp,
+                    vertices
+                ));
+                totalArea += panel.area();
+            }
+        } else if (polar.isQuadMethod() && wingIndex < opp.nWOpps()) {
+            const WingOpp &wingOpp = opp.WOpp(wingIndex);
+            if (!wingOpp.m_dCp) continue;
+            const int first = wing->firstPanel4Index();
+            const int count = std::min(wing->nPanel4(), wingOpp.m_nPanel4);
+            for (int local = 0; local < count; ++local) {
+                const Panel4 &panel = plane.panel4(first + local);
+                const double cp = wingOpp.m_dCp[local];
+                if (!std::isfinite(cp) || !(panel.area() > 0.0)) continue;
+                QJsonArray vertices;
+                for (int vertex = 0; vertex < 4; ++vertex)
+                    vertices.append(vectorArray(panel.vertex(vertex)));
+                panels.append(panelRecord(
+                    panel,
+                    wingIndex,
+                    surfaceCount,
+                    wingletActive,
+                    cp,
+                    vertices
+                ));
+                totalArea += panel.area();
+            }
+        }
+    }
+    return {
+        {"target_cl", targetCl},
+        {"sampled_cl", sampledCl},
+        {"sampled_alpha_deg", sampledAlpha},
+        {"panel_count", int(panels.size())},
+        {"panel_area_sum_m2", totalArea},
+        {"thin_surfaces", polar.bThinSurfaces()},
+        {"upper_lower_resolved", !polar.bThinSurfaces()},
+        {"cp_definition", polar.bThinSurfaces()
+            ? "flow5 thin-surface panel pressure coefficient"
+            : "flow5 resolved surface pressure coefficient"},
+        {"panels", panels},
+    };
+}
+
 static QJsonObject runWing(const QJsonObject &request)
 {
     gmsh::initialize();
@@ -368,6 +502,14 @@ static QJsonObject runWing(const QJsonObject &request)
     const double alphaMax = number(alpha, "max_deg");
     const double alphaStep = number(alpha, "step_deg");
     const int maxThreads = integerOr(request, "max_threads", 1);
+    const bool panelTelemetryRequested = request.value("panel_telemetry").toBool(false);
+    const bool wingletActive = request.value("winglet_active").toBool(false);
+    const bool thinSurfaces = request.value("thin_surfaces").toBool(true);
+    const double panelTelemetryTargetLift = numberOr(
+        request,
+        "panel_telemetry_target_lift_n",
+        std::numeric_limits<double>::quiet_NaN()
+    );
     PanelAnalysis::setMaxThreadCount(maxThreads);
     const QJsonArray cases = request.value("cases").toArray();
     if (cases.isEmpty()) throw std::runtime_error("No wing cases supplied");
@@ -385,7 +527,7 @@ static QJsonObject runWing(const QJsonObject &request)
         polar->setReferenceArea(plane->projectedArea());
         polar->setReferenceSpanLength(plane->projectedSpan());
         polar->setReferenceChordLength(plane->mac());
-        polar->setThinSurfaces(true);
+        polar->setThinSurfaces(thinSurfaces);
         polar->setViscous(true);
         polar->setViscOnTheFly(true);
         polar->setViscFromCl(false);
@@ -410,6 +552,22 @@ static QJsonObject runWing(const QJsonObject &request)
         QJsonArray points;
         const std::size_t count = std::min(polar->m_Alpha.size(), polar->m_AF.size());
         const double q = 0.5 * density * speed * speed;
+        int telemetryIndex = -1;
+        double telemetryTargetCl = std::numeric_limits<double>::quiet_NaN();
+        if (panelTelemetryRequested && std::isfinite(panelTelemetryTargetLift)) {
+            telemetryTargetCl = panelTelemetryTargetLift /
+                std::max(q * polar->referenceArea(), 1.0e-12);
+            double bestClDistance = std::numeric_limits<double>::infinity();
+            for (std::size_t index = 0; index < count; ++index) {
+                const double cl = polar->m_AF[index].CL();
+                if (!std::isfinite(cl)) continue;
+                const double distance = std::abs(cl - telemetryTargetCl);
+                if (distance < bestClDistance) {
+                    telemetryIndex = int(index);
+                    bestClDistance = distance;
+                }
+            }
+        }
         for (std::size_t index = 0; index < count; ++index) {
             const AeroForces &forces = polar->m_AF[index];
             const double cl = forces.CL();
@@ -470,12 +628,33 @@ static QJsonObject runWing(const QJsonObject &request)
             if (std::isfinite(cpMin)) point.insert("cp_min", cpMin);
             points.append(point);
         }
-        outputCases.append(QJsonObject{
+        QJsonObject outputCase{
             {"speed_m_s", speed},
             {"method", QString::fromStdString(methodName)},
             {"points", points},
             {"raw_export", QString::fromStdString(polar->exportToString(","))},
-        });
+        };
+        if (telemetryIndex >= 0 && telemetryIndex < int(count)) {
+            const PlaneOpp *telemetryOpp = nearestPlaneOpp(
+                *task,
+                polar->m_Alpha[std::size_t(telemetryIndex)]
+            );
+            if (telemetryOpp) {
+                outputCase.insert(
+                    "panel_telemetry",
+                    panelTelemetry(
+                        *plane,
+                        *telemetryOpp,
+                        *polar,
+                        wingletActive,
+                        telemetryTargetCl,
+                        polar->m_AF[std::size_t(telemetryIndex)].CL(),
+                        polar->m_Alpha[std::size_t(telemetryIndex)]
+                    )
+                );
+            }
+        }
+        outputCases.append(outputCase);
     }
 
     QJsonObject artifacts;
