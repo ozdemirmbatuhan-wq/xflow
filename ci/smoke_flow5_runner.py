@@ -39,11 +39,26 @@ def main() -> None:
     assert len(foil["polars"][0]["points"]) >= 3
 
     geometry = WingGeometry(1.8, 0.36, 0.55, 3.0, -1.5, 0.0)
+    winglet_geometry = WingGeometry(
+        1.8,
+        0.36,
+        0.55,
+        3.0,
+        -1.5,
+        0.0,
+        winglet_enabled=True,
+        winglet_height=0.20,
+        winglet_cant_deg=78.0,
+        winglet_toe_deg=1.0,
+        winglet_taper=0.58,
+    )
     for method, save_project in (("VLM2", False), ("TRIUNIFORM", True)):
         wing = runner.analyze_wing(
-            geometry=geometry,
+            geometry=winglet_geometry if save_project else geometry,
             method=method,
             save_project=save_project,
+            panel_telemetry=save_project,
+            panel_telemetry_target_lift_n=40.0 if save_project else None,
             **common,
         )
         assert wing["foil_coordinate_points_used"] == 100
@@ -57,11 +72,19 @@ def main() -> None:
         assert wing["mesh"]["half_span_panels"] == 18
         if save_project:
             assert any(point.get("cp_min") is not None for point in points)
+            telemetry = wing["cases"][0].get("panel_telemetry", {})
+            assert telemetry.get("panel_count", 0) > 0
+            assert telemetry.get("panels")
+            assert all(panel.get("vertices") for panel in telemetry["panels"][:10])
+            assert any(
+                panel.get("component") == "winglet"
+                for panel in telemetry["panels"]
+            )
             assert "project_fl5" in wing.get("artifact_payloads", {})
 
     print(
         "Real flow5 7.57 smoke test passed: E818/100 points, VLM2, "
-        "TRIUNIFORM, telemetry, Cp_min, spanwise distribution, FL5"
+        "TRIUNIFORM winglet, Cp panel map, spanwise distribution, FL5"
     )
 
 
